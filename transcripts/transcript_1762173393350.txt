@@ -1,0 +1,14 @@
+=== Real-Time Transcript Started at 2025-11-03T18:06:35.394769 ===
+
+As the recorder is ready to convert my speech to text, I start speaking. Even if I speak fastly and continuously, it has to find my words properly.
+As the recorder is ready to convert my speech to text, I start speaking. Even if I speak fastly and continuously, it has to find my words properly.
+Able to test it.
+Able to test it.
+Able to find when I started speaking it just clipped off most of the sentence I spoke and just gave able to test it in the middle.
+How long can I wait to get the sentence?
+How long can I wait to get the sentence?
+Still poor. I can't shout loud more than this.
+Still poor. I can't shout loud more than this.
+
+
+=== Real-Time Transcript Ended at 2025-11-03T18:08:38.971147 ===

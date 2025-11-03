@@ -1,0 +1,9 @@
+Hello.
+Today is Friday.
+Is the recording getting stored?
+I should have seen the transcript by now.
+But it's not getting displayed. Only Hello today's Friday is displayed.
+But I want the others too.
+தொக்குமாவா வருதுய்யா?
+அங்க போய்ட்டு நல்லா வெரைட்டி லேசா சாப்பிட புதினா சாதம், மாங்கா சாதம்.
+ஆமா அதனால தான்.
