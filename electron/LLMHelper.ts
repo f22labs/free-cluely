@@ -253,6 +253,64 @@ export class LLMHelper {
     }
   }
 
+  /**
+   * Transcribe audio file with a custom prompt
+   * @param audioPath Path to the audio file
+   * @param customPrompt Optional custom prompt for transcription. If not provided, uses default transcription prompt.
+   * @returns Transcript text and timestamp
+   */
+  public async transcribeAudioFile(audioPath: string, customPrompt?: string): Promise<{ text: string; timestamp: number }> {
+    try {
+      const audioData = await fs.promises.readFile(audioPath);
+      const audioPart = {
+        inlineData: {
+          data: audioData.toString("base64"),
+          mimeType: audioPath.endsWith('.wav') ? "audio/wav" : "audio/mp3"
+        }
+      };
+      
+      // Use custom prompt or default transcription prompt
+      const prompt = customPrompt || `Please transcribe this audio file word-for-word. Provide a clear, accurate transcription of everything that is said. If there are multiple speakers, indicate who is speaking. Return only the transcription text, no additional commentary.`;
+      
+      const result = await this.model.generateContent([prompt, audioPart]);
+      const response = await result.response;
+      const text = response.text();
+      return { text, timestamp: Date.now() };
+    } catch (error) {
+      console.error("Error transcribing audio file:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Transcribe audio from base64 data with a custom prompt
+   * @param data Base64 encoded audio data
+   * @param mimeType MIME type of the audio
+   * @param customPrompt Optional custom prompt for transcription
+   * @returns Transcript text and timestamp
+   */
+  public async transcribeAudioFromBase64(data: string, mimeType: string, customPrompt?: string): Promise<{ text: string; timestamp: number }> {
+    try {
+      const audioPart = {
+        inlineData: {
+          data,
+          mimeType
+        }
+      };
+      
+      // Use custom prompt or default transcription prompt
+      const prompt = customPrompt || `Please transcribe this audio clip word-for-word. Provide a clear, accurate transcription of everything that is said. If there are multiple speakers, indicate who is speaking. Return only the transcription text, no additional commentary.`;
+      
+      const result = await this.model.generateContent([prompt, audioPart]);
+      const response = await result.response;
+      const text = response.text();
+      return { text, timestamp: Date.now() };
+    } catch (error) {
+      console.error("Error transcribing audio from base64:", error);
+      throw error;
+    }
+  }
+
   public async chatWithGemini(message: string): Promise<string> {
     try {
       if (this.useOllama) {
