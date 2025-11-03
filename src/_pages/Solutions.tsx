@@ -134,6 +134,8 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
   // Audio recording state
   const [audioRecording, setAudioRecording] = useState(false)
   const [audioResult, setAudioResult] = useState<AudioResult | null>(null)
+  const [realTimeTranscript, setRealTimeTranscript] = useState<string>("")
+  const [transcriptFilepath, setTranscriptFilepath] = useState<string>("")
 
   const [debugProcessing, setDebugProcessing] = useState(false)
   const [problemStatementData, setProblemStatementData] =
@@ -254,51 +256,145 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         setSpaceComplexityData(null)
         setCustomContent(null)
         setAudioResult(null)
+        setRealTimeTranscript("")
+        setTranscriptFilepath("")
 
-        // Start audio recording from user's microphone
+        // Start real-time transcription session with RealtimeSTT (Python service)
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          const mediaRecorder = new MediaRecorder(stream)
-          const chunks: Blob[] = []
-          mediaRecorder.ondataavailable = (e) => chunks.push(e.data)
-          mediaRecorder.start()
-          setAudioRecording(true)
-          // Record for 5 seconds (or adjust as needed)
-          setTimeout(() => mediaRecorder.stop(), 5000)
-          mediaRecorder.onstop = async () => {
+          const sessionResult = await window.electronAPI.startRealTimeTranscription()
+          if (sessionResult.success && sessionResult.filePath) {
+            setTranscriptFilepath(sessionResult.filePath)
+            setCustomContent("Starting real-time transcription...\n\n")
+            setAudioRecording(true)
+          } else {
+            console.error('Failed to start real-time transcription:', sessionResult.error)
             setAudioRecording(false)
-            const blob = new Blob(chunks, { type: chunks[0]?.type || 'audio/webm' })
-            const reader = new FileReader()
-            reader.onloadend = async () => {
-              const base64Data = (reader.result as string).split(',')[1]
-              // Send audio to Gemini for analysis
-              try {
-                const result = await window.electronAPI.analyzeAudioFromBase64(
-                  base64Data,
-                  blob.type
-                )
-                // Store result in react-query cache
-                queryClient.setQueryData(["audio_result"], result)
-                setAudioResult(result)
-              } catch (err) {
-                console.error('Audio analysis failed:', err)
-              }
-            }
-            reader.readAsDataURL(blob)
+            return
           }
         } catch (err) {
-          console.error('Audio recording error:', err)
+          console.error('Failed to start real-time transcription:', err)
+          setAudioRecording(false)
+          return
         }
 
-        // Simulate receiving custom content shortly after start
-        setTimeout(() => {
-          setCustomContent(
-            "This is the dynamically generated content appearing after loading starts."
-          )
-        }, 1500) // Example delay
+        // Set up listeners for RealtimeSTT transcription updates
+        let unsubscribeUpdate: (() => void) | null = null
+        let unsubscribeComplete: (() => void) | null = null
+        let refreshInterval: NodeJS.Timeout | null = null
+        
+        unsubscribeUpdate = window.electronAPI.onRealtimeTranscriptionUpdate((data) => {
+          // Update UI with real-time transcription - REPLACE with full transcript
+          if (data.fullTranscript) {
+            // Use fullTranscript which includes completed sentences + current partial
+            setRealTimeTranscript(data.fullTranscript)
+            setCustomContent(data.fullTranscript)
+          } else if (data.text) {
+            // Fallback: just use the partial text
+            setRealTimeTranscript(data.text)
+            setCustomContent(data.text)
+          }
+        })
+
+        unsubscribeComplete = window.electronAPI.onRealtimeTranscriptionComplete((data) => {
+          // Update UI with completed transcription - always use fullTranscript
+          if (data.fullTranscript) {
+            setRealTimeTranscript(data.fullTranscript)
+            setCustomContent(data.fullTranscript)
+          } else if (data.text) {
+            // Fallback: append completed sentence
+            setRealTimeTranscript((prev) => {
+              const current = prev || ""
+              const updated = current + (current ? " " : "") + data.text
+              setCustomContent(updated)
+              return updated
+            })
+          }
+        })
+
+        // Also periodically refresh transcript from file (every 2 seconds) as backup
+        refreshInterval = setInterval(async () => {
+          try {
+            const transcriptResult = await window.electronAPI.getRealTimeTranscript()
+            if (transcriptResult.success && transcriptResult.transcript) {
+              const transcriptLines = transcriptResult.transcript.split('\n')
+              const contentStart = transcriptLines.findIndex(line => 
+                !line.includes('===') && line.trim().length > 0
+              )
+              const contentEnd = transcriptLines.findLastIndex(line => 
+                !line.includes('===') && line.trim().length > 0
+              )
+              const cleanTranscript = transcriptLines.slice(contentStart, contentEnd + 1).join('\n').trim()
+              if (cleanTranscript) {
+                setRealTimeTranscript(cleanTranscript)
+                setCustomContent(cleanTranscript)
+              }
+            }
+          } catch (err) {
+            console.error('Error refreshing transcript:', err)
+          }
+        }, 2000)
+
+        // Store cleanup functions for later
+        const cleanupFunctions = {
+          unsubscribeUpdate,
+          unsubscribeComplete,
+          refreshInterval,
+          stop: async () => {
+            setAudioRecording(false)
+            
+            // Clear refresh interval
+            if (refreshInterval) {
+              clearInterval(refreshInterval)
+            }
+            
+            // Unsubscribe from events
+            if (cleanupFunctions.unsubscribeUpdate) {
+              cleanupFunctions.unsubscribeUpdate()
+            }
+            if (cleanupFunctions.unsubscribeComplete) {
+              cleanupFunctions.unsubscribeComplete()
+            }
+            
+            // Stop real-time transcription session
+            try {
+              const stopResult = await window.electronAPI.stopRealTimeTranscription()
+              if (stopResult.success) {
+                console.log('Real-time transcription saved to:', stopResult.filePath)
+                
+                // Get final transcript
+                const transcriptResult = await window.electronAPI.getRealTimeTranscript()
+                if (transcriptResult.success && transcriptResult.transcript) {
+                  const transcriptLines = transcriptResult.transcript.split('\n')
+                  const contentStart = transcriptLines.findIndex(line => 
+                    !line.includes('===') && line.trim().length > 0
+                  )
+                  const contentEnd = transcriptLines.findLastIndex(line => 
+                    !line.includes('===') && line.trim().length > 0
+                  )
+                  const cleanTranscript = transcriptLines.slice(contentStart, contentEnd + 1).join('\n').trim()
+                  if (cleanTranscript) {
+                    setRealTimeTranscript(cleanTranscript)
+                    setCustomContent(cleanTranscript)
+                  }
+                }
+              }
+            } catch (err) {
+              console.error('Failed to stop real-time transcription:', err)
+            }
+          }
+        }
+
+        // Store cleanup in a way we can access it later (e.g., when solution processing completes)
+        ;(window as any).__solutionCleanup = cleanupFunctions
       }),
       //if there was an error processing the initial solution
-      window.electronAPI.onSolutionError((error: string) => {
+      window.electronAPI.onSolutionError(async (error: string) => {
+        // Clean up transcription if it's still running
+        if ((window as any).__solutionCleanup) {
+          await (window as any).__solutionCleanup.stop()
+          ;(window as any).__solutionCleanup = null
+        }
+        
         showToast(
           "Processing Failed",
           "There was an error processing your extra screenshots.",
@@ -321,7 +417,13 @@ const Solutions: React.FC<SolutionsProps> = ({ setView }) => {
         console.error("Processing error:", error)
       }),
       //when the initial solution is generated, we'll set the solution data to that
-      window.electronAPI.onSolutionSuccess((data) => {
+      window.electronAPI.onSolutionSuccess(async (data) => {
+        // Clean up transcription if it's still running
+        if ((window as any).__solutionCleanup) {
+          await (window as any).__solutionCleanup.stop()
+          ;(window as any).__solutionCleanup = null
+        }
+        
         if (!data?.solution) {
           console.warn("Received empty or invalid solution data")
           return

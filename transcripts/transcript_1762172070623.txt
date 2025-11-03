@@ -1,0 +1,14 @@
+=== Real-Time Transcript Started at 2025-11-03T17:44:32.525740 ===
+
+The status is ready now.
+The status is ready now.
+This is a sample recording of how the Freak Lully works.
+This is a sample recording of how the Freak Lully works.
+And shows the real-time transcription in the screen.
+And shows the real-time transcription in the screen.
+
+
+=== Real-Time Transcript Ended at 2025-11-03T12:15:21.540Z (Duration: 51s) ===
+
+
+=== Real-Time Transcript Ended at 2025-11-03T17:48:20.535962 ===

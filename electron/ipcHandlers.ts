@@ -196,4 +196,88 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: false, error: error.message };
     }
   });
+
+  // IPC handler for transcribing audio file with custom prompt
+  ipcMain.handle("transcribe-audio-file", async (event, audioPath: string, customPrompt?: string, filename?: string) => {
+    try {
+      const result = await appState.processingHelper.transcribeAndSaveAudioFile(audioPath, customPrompt, filename)
+      return result
+    } catch (error: any) {
+      console.error("Error in transcribe-audio-file handler:", error)
+      throw error
+    }
+  })
+
+  // IPC handler for transcribing audio from base64 with custom prompt
+  ipcMain.handle("transcribe-audio-base64", async (event, data: string, mimeType: string, customPrompt?: string, filename?: string) => {
+    try {
+      const result = await appState.processingHelper.transcribeAndSaveAudioFromBase64(data, mimeType, customPrompt, filename)
+      return result
+    } catch (error: any) {
+      console.error("Error in transcribe-audio-base64 handler:", error)
+      throw error
+    }
+  })
+
+  // IPC handler for saving transcript text to file
+  ipcMain.handle("save-transcript", async (event, transcriptText: string, filename?: string) => {
+    try {
+      const filePath = await appState.processingHelper.saveTranscriptToFile(transcriptText, filename)
+      return { success: true, filePath }
+    } catch (error: any) {
+      console.error("Error in save-transcript handler:", error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Real-time transcription handlers
+  ipcMain.handle("start-realtime-transcription", async (event, filename?: string) => {
+    try {
+      const filePath = await appState.processingHelper.startRealTimeTranscription(filename)
+      return { success: true, filePath }
+    } catch (error: any) {
+      console.error("Error in start-realtime-transcription handler:", error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle("process-realtime-audio-chunk", async (event, data: string, mimeType: string, customPrompt?: string) => {
+    try {
+      const result = await appState.processingHelper.processRealTimeAudioChunk(data, mimeType, customPrompt)
+      return result
+    } catch (error: any) {
+      console.error("Error in process-realtime-audio-chunk handler:", error)
+      throw error
+    }
+  })
+
+  ipcMain.handle("stop-realtime-transcription", async () => {
+    try {
+      const filePath = await appState.processingHelper.stopRealTimeTranscription()
+      return { success: true, filePath }
+    } catch (error: any) {
+      console.error("Error in stop-realtime-transcription handler:", error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle("get-realtime-transcript", async () => {
+    try {
+      const transcript = await appState.processingHelper.getRealTimeTranscript()
+      return { success: true, transcript }
+    } catch (error: any) {
+      console.error("Error in get-realtime-transcript handler:", error)
+      return { success: false, error: error.message, transcript: null }
+    }
+  })
+
+  ipcMain.handle("is-realtime-transcription-active", async () => {
+    try {
+      const isActive = appState.processingHelper.isRealTimeTranscriptionActive()
+      return { isActive }
+    } catch (error: any) {
+      console.error("Error in is-realtime-transcription-active handler:", error)
+      return { isActive: false }
+    }
+  })
 }

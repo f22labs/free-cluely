@@ -20,7 +20,6 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
   const [isRecording, setIsRecording] = useState(false)
   const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder | null>(null)
   const [audioResult, setAudioResult] = useState<string | null>(null)
-  const chunks = useRef<Blob[]>([])
   // Remove all chat-related state, handlers, and the Dialog overlay from this file.
 
   useEffect(() => {
@@ -43,33 +42,107 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
     if (!isRecording) {
       // Start recording
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        const recorder = new MediaRecorder(stream)
-        recorder.ondataavailable = (e) => chunks.current.push(e.data)
-        recorder.onstop = async () => {
-          const blob = new Blob(chunks.current, { type: chunks.current[0]?.type || 'audio/webm' })
-          chunks.current = []
-          const reader = new FileReader()
-          reader.onloadend = async () => {
-            const base64Data = (reader.result as string).split(',')[1]
+        // Start real-time transcription session with RealtimeSTT (Python service)
+        const sessionResult = await window.electronAPI.startRealTimeTranscription()
+        if (!sessionResult.success) {
+          console.error('Failed to start real-time transcription:', sessionResult.error)
+          setAudioResult('Failed to start transcription service.')
+          setIsRecording(false)
+          return
+        }
+
+        // Set up listeners for RealtimeSTT transcription updates
+        let unsubscribeUpdate: (() => void) | null = null
+        let unsubscribeComplete: (() => void) | null = null
+        
+        unsubscribeUpdate = window.electronAPI.onRealtimeTranscriptionUpdate((data) => {
+          // Update UI with real-time transcription - REPLACE with full transcript (complete + partial)
+          if (data.fullTranscript) {
+            // Use fullTranscript which includes completed sentences + current partial
+            setAudioResult(data.fullTranscript)
+          } else if (data.text) {
+            // Fallback: just use the partial text
+            setAudioResult(data.text)
+          }
+        })
+
+        unsubscribeComplete = window.electronAPI.onRealtimeTranscriptionComplete((data) => {
+          // Update UI with completed transcription - always use fullTranscript
+          if (data.fullTranscript) {
+            setAudioResult(data.fullTranscript)
+          } else if (data.text) {
+            // Fallback: append completed sentence
+            setAudioResult((prev) => {
+              const current = prev || ""
+              return current + (current ? " " : "") + data.text
+            })
+          }
+        })
+
+        // RealtimeSTT handles microphone directly - no need for MediaRecorder
+        // Create a recorder object for cleanup
+        const recorderObj = {
+          unsubscribeUpdate,
+          unsubscribeComplete,
+          stop: async () => {
+            setIsRecording(false)
+            
+            // Unsubscribe from events
+            if (recorderObj.unsubscribeUpdate) {
+              recorderObj.unsubscribeUpdate()
+            }
+            if (recorderObj.unsubscribeComplete) {
+              recorderObj.unsubscribeComplete()
+            }
+            
+            // Stop real-time transcription session
             try {
-              const result = await window.electronAPI.analyzeAudioFromBase64(base64Data, blob.type)
-              setAudioResult(result.text)
+              const stopResult = await window.electronAPI.stopRealTimeTranscription()
+              if (stopResult.success && stopResult.filePath) {
+                console.log('Real-time transcription saved to:', stopResult.filePath)
+                
+                // Get the final transcript for display
+                const transcriptResult = await window.electronAPI.getRealTimeTranscript()
+                if (transcriptResult.success && transcriptResult.transcript) {
+                  // Show just the transcript text (not the header/footer)
+                  const transcriptLines = transcriptResult.transcript.split('\n')
+                  const contentStart = transcriptLines.findIndex(line => 
+                    !line.includes('===') && line.trim().length > 0
+                  )
+                  const contentEnd = transcriptLines.findLastIndex(line => 
+                    !line.includes('===') && line.trim().length > 0
+                  )
+                  const cleanTranscript = transcriptLines.slice(contentStart, contentEnd + 1).join('\n').trim()
+                  setAudioResult(cleanTranscript || 'Transcription completed.')
+                } else {
+                  setAudioResult('Transcription completed.')
+                }
+              }
             } catch (err) {
-              setAudioResult('Audio analysis failed.')
+              console.error('Failed to stop real-time transcription:', err)
+              setAudioResult('Recording stopped, but transcription may be incomplete.')
             }
           }
-          reader.readAsDataURL(blob)
         }
-        setMediaRecorder(recorder)
-        recorder.start()
+        
+        setMediaRecorder(recorderObj as any)
         setIsRecording(true)
       } catch (err) {
         setAudioResult('Could not start recording.')
+        setIsRecording(false)
       }
     } else {
-      // Stop recording
-      mediaRecorder?.stop()
+      // Stop recording - RealtimeSTT handles this through the session
+      if (mediaRecorder && typeof mediaRecorder.stop === 'function') {
+        mediaRecorder.stop()
+      } else {
+        // Fallback: stop the transcription session directly
+        try {
+          window.electronAPI.stopRealTimeTranscription()
+        } catch (err) {
+          console.error('Error stopping transcription:', err)
+        }
+      }
       setIsRecording(false)
       setMediaRecorder(null)
     }

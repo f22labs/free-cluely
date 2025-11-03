@@ -25,6 +25,8 @@ interface ElectronAPI {
 
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => () => void
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
@@ -34,6 +36,18 @@ interface ElectronAPI {
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   analyzeImageFile: (path: string) => Promise<void>
   quitApp: () => Promise<void>
+  
+  // Transcription methods
+  transcribeAudioFile: (audioPath: string, customPrompt?: string, filename?: string) => Promise<{ text: string; filePath: string; timestamp: number }>
+  transcribeAudioFromBase64: (data: string, mimeType: string, customPrompt?: string, filename?: string) => Promise<{ text: string; filePath: string; timestamp: number }>
+  saveTranscript: (transcriptText: string, filename?: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+  
+  // Real-time transcription methods
+  startRealTimeTranscription: (filename?: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+  processRealTimeAudioChunk: (data: string, mimeType: string, customPrompt?: string) => Promise<{ chunk: string; fullTranscript: string; timestamp: number }>
+  stopRealTimeTranscription: () => Promise<{ success: boolean; filePath?: string; error?: string }>
+  getRealTimeTranscript: () => Promise<{ success: boolean; transcript: string | null; error?: string }>
+  isRealTimeTranscriptionActive: () => Promise<{ isActive: boolean }>
   
   // LLM Model Management
   getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini"; model: string; isOllama: boolean }>
@@ -171,6 +185,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
     }
   },
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string | null }) => callback(data)
+    ipcRenderer.on("realtime-transcription-update", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-update", subscription)
+    }
+  },
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string }) => callback(data)
+    ipcRenderer.on("realtime-transcription-complete", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-complete", subscription)
+    }
+  },
   moveWindowLeft: () => ipcRenderer.invoke("move-window-left"),
   moveWindowRight: () => ipcRenderer.invoke("move-window-right"),
   moveWindowUp: () => ipcRenderer.invoke("move-window-up"),
@@ -179,6 +207,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
   analyzeAudioFile: (path: string) => ipcRenderer.invoke("analyze-audio-file", path),
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
   quitApp: () => ipcRenderer.invoke("quit-app"),
+  
+  // Transcription methods
+  transcribeAudioFile: (audioPath: string, customPrompt?: string, filename?: string) => 
+    ipcRenderer.invoke("transcribe-audio-file", audioPath, customPrompt, filename),
+  transcribeAudioFromBase64: (data: string, mimeType: string, customPrompt?: string, filename?: string) => 
+    ipcRenderer.invoke("transcribe-audio-base64", data, mimeType, customPrompt, filename),
+  saveTranscript: (transcriptText: string, filename?: string) => 
+    ipcRenderer.invoke("save-transcript", transcriptText, filename),
+  
+  // Real-time transcription methods
+  startRealTimeTranscription: (filename?: string) => 
+    ipcRenderer.invoke("start-realtime-transcription", filename),
+  processRealTimeAudioChunk: (data: string, mimeType: string, customPrompt?: string) => 
+    ipcRenderer.invoke("process-realtime-audio-chunk", data, mimeType, customPrompt),
+  stopRealTimeTranscription: () => 
+    ipcRenderer.invoke("stop-realtime-transcription"),
+  getRealTimeTranscript: () => 
+    ipcRenderer.invoke("get-realtime-transcript"),
+  isRealTimeTranscriptionActive: () => 
+    ipcRenderer.invoke("is-realtime-transcription-active"),
   
   // LLM Model Management
   getCurrentLlmConfig: () => ipcRenderer.invoke("get-current-llm-config"),

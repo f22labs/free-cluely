@@ -1,0 +1,12 @@
+=== Real-Time Transcript Started at 2025-11-03T16:11:06.979423 ===
+
+Hello is the morning.
+Hello is the morning.
+Is the model able to
+Is the model able to
+Able to transcribe my speech.
+My speech is getting splittered.
+My speech is getting splittered.
+
+
+=== Real-Time Transcript Ended at 2025-11-03T16:12:40.956579 ===

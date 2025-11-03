@@ -1,0 +1,18 @@
+=== Real-Time Transcript Started at 2025-11-03T16:45:53.748063 ===
+
+Hello.
+Hello.
+I'm expecting the speech.
+I'm expecting the speech.
+Inaccurate.
+Inaccurate.
+I think I can change the model to large V3 to large V2 to large V3.
+I think I can change the model to large V3 to large V2 to large V3.
+It has the person who is speaking in the call.
+It has the person who is speaking in the call.
+
+
+=== Real-Time Transcript Ended at 2025-11-03T11:17:35.264Z (Duration: 103s) ===
+
+
+=== Real-Time Transcript Ended at 2025-11-03T16:49:06.314066 ===
