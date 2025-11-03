@@ -1,1 +1,0 @@
-Hello. Now I expect the transcript to get stored as I speak in real time into the transcript file. Is this happening? It has to get streamed and stored inside the transcript file.

@@ -1,7 +1,0 @@
-=== Real-Time Transcript Started at 2025-11-03T09:26:37.284Z ===
-
-Hello. Today is Friday.
-
-
-
-=== Real-Time Transcript Ended at 2025-11-03T09:27:46.619Z (Duration: 69s) ===

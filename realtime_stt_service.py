@@ -224,16 +224,37 @@ class RealtimeSTTService:
                         return  # Don't add error messages to transcript
                     
                     if cleaned:
-                        # IMPORTANT: Check if any text from real-time buffer was missed
-                        # This ensures we capture everything even if real-time updates were incomplete
+                        # CRITICAL: Intelligent buffer merging to prevent word loss
+                        # Check if any text from real-time buffer was missed
                         self._send_error(f"[DEBUG] Real-time buffer has {len(self.realtime_buffer)} entries before processing")
+                        
+                        # SMART MERGING: Compare final transcription with buffer to catch missed words
+                        # If buffer has longer/more complete text, use it instead or merge intelligently
+                        if self.realtime_buffer:
+                            # Get the most complete entry from buffer (usually the last one)
+                            buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
+                            
+                            # If buffer text is significantly longer or more complete, it might have more words
+                            # Use the longer/more detailed version, prioritizing buffer during fast speech
+                            if buffer_text and len(buffer_text) > len(cleaned) * 1.2:  # Buffer is 20%+ longer
+                                self._send_error(f"[DEBUG] Buffer text longer ({len(buffer_text)}) than final ({len(cleaned)}), using buffer text")
+                                # Prefer buffer if it's substantially longer (likely more complete for fast speech)
+                                if buffer_text.lower() not in cleaned.lower() and cleaned.lower() not in buffer_text.lower():
+                                    # They're different - merge them intelligently
+                                    # Use buffer if it contains the final text plus more
+                                    if cleaned.lower() in buffer_text.lower():
+                                        cleaned = buffer_text  # Use the longer buffer version
+                                        self._send_error(f"[DEBUG] Using buffer text as it contains final text plus more: '{cleaned[:60]}...'")
+                                    # Otherwise keep the final text but log the discrepancy
+                                    else:
+                                        self._send_error(f"[DEBUG] WARNING: Buffer and final text differ significantly. Final: '{cleaned[:40]}...' Buffer: '{buffer_text[:40]}...'")
                         
                         # Check if this is already in the transcript to avoid duplicates
                         if cleaned not in self.full_transcript:
                             self.full_transcript.append(cleaned)
                             self._send_error(f"[DEBUG] Added to transcript. Total sentences: {len(self.full_transcript)}")
                             
-                            # Clear real-time buffer after successful transcription
+                            # Clear real-time buffer AFTER successful transcription and merging
                             self.realtime_buffer.clear()
                             
                             # Send complete transcription
@@ -252,9 +273,25 @@ class RealtimeSTTService:
                             self.realtime_buffer.clear()
                 else:
                     self._send_error(f"[DEBUG] on_transcription_complete: text is empty or None")
-                    # Even if empty, check if buffer has content we should preserve
+                    # CRITICAL: If final transcription is empty but buffer has content, use buffer!
+                    # This handles cases where fast speech causes final transcription to fail
                     if self.realtime_buffer:
                         self._send_error(f"[DEBUG] WARNING: Complete callback empty but buffer has {len(self.realtime_buffer)} entries!")
+                        # Use the most complete buffer entry as fallback
+                        buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
+                        if buffer_text and buffer_text.strip():
+                            cleaned = self._preprocess_text(buffer_text.strip())
+                            if cleaned and cleaned not in self.full_transcript:
+                                self._send_error(f"[DEBUG] FALLBACK: Using buffer text '{cleaned[:50]}...' since final transcription was empty")
+                                self.full_transcript.append(cleaned)
+                                self._send_message({
+                                    "type": "transcription_complete",
+                                    "text": cleaned,
+                                    "full_transcript": " ".join(self.full_transcript),
+                                    "timestamp": self._get_timestamp()
+                                })
+                                self._append_to_file(cleaned, is_realtime=False)
+                            self.realtime_buffer.clear()
             except Exception as callback_error:
                 # Don't let callback errors break the loop
                 self._send_error(f"[DEBUG] Error in on_transcription_complete callback: {callback_error}")
@@ -268,33 +305,38 @@ class RealtimeSTTService:
                 'model': self.model,
                 'realtime_model_type': self.realtime_model,
                 'language': self.language,
-                # Voice Activity Detection settings - optimized for continuous speech
-                # Note: silero_sensitivity: 0.0 = most sensitive, 1.0 = least sensitive (we want lower)
-                #       webrtc_sensitivity: 0 = most sensitive, 3 = least sensitive (we want lower)
-                'silero_sensitivity': 0.3,  # More sensitive (0.3 = detects speech easily)
-                'webrtc_sensitivity': 1,  # More sensitive VAD (1 = detects more speech)
-                # CRITICAL: Long silence duration to handle continuous speech without breaking prematurely
-                'post_speech_silence_duration': 3.0,  # Wait 3.0 seconds of silence before breaking - captures long continuous speech
-                'min_length_of_recording': 0.2,  # Start transcribing quickly
-                'min_gap_between_recordings': 0.1,  # Small gap to ensure no overlap
+                # Voice Activity Detection settings - OPTIMIZED FOR FAST SPEECH & LONG SILENCE
+                # Note: silero_sensitivity: 0.0 = most sensitive, 1.0 = least sensitive (we want MUCH lower for fast speech)
+                #       webrtc_sensitivity: 0 = most sensitive, 3 = least sensitive (we want 0 for maximum sensitivity)
+                'silero_sensitivity': 0.15,  # VERY sensitive (0.15 = catches fast speech and speech after silence)
+                'webrtc_sensitivity': 0,  # MAXIMUM sensitivity (0 = catches every speech event, even after long silence)
+                # CRITICAL: Balanced silence duration - short enough to detect fast speech, long enough for continuous speech
+                'post_speech_silence_duration': 2.5,  # 2.5s - faster response than 3.0s, but still captures long speech
+                'min_length_of_recording': 0.3,  # 0.3s - slightly longer for better quality, prevents premature cuts on fast speech
+                'min_gap_between_recordings': 0.05,  # 0.05s - smaller gap for faster detection, ensures no missed words
                 'enable_realtime_transcription': True,
                 'realtime_processing_pause': 0.01,  # Faster updates (10ms) for continuous speech
                 'on_realtime_transcription_update': on_realtime_update,
-                'silero_deactivity_detection': True,
-                'early_transcription_on_silence': 2.0,  # Wait 2.0s of silence before finalizing - ensures all continuous speech is captured
-                # Add initial prompt to help with continuous/long speech
+                'silero_deactivity_detection': True,  # Enable deactivity detection for better silence handling
+                'early_transcription_on_silence': 1.8,  # 1.8s - faster finalization, prevents waiting too long (good for fast speech)
+                # Additional VAD settings for better detection
+                'silero_use_onnx': True,  # Use ONNX for faster VAD processing
+                # Enhanced initial prompt optimized for fast speech and accuracy
                 'initial_prompt_realtime': (
-                    "This is continuous speech transcription. "
-                    "Transcribe everything that is said word-for-word. "
-                    "Do not skip any words or sentences, even during fast or long continuous speech. "
-                    "Wait for longer pauses before finalizing sentences. "
-                    "Capture all spoken words completely."
+                    "This is real-time speech transcription requiring word-for-word accuracy. "
+                    "Transcribe every single word spoken, including fast speech and rapid-fire sentences. "
+                    "Do not skip, omit, or abbreviate any words, even when speech is very fast. "
+                    "Capture speech that starts after long pauses or silence periods. "
+                    "Maintain accuracy even during rapid continuous speech without breaks. "
+                    "Prioritize completeness over speed - capture everything that is spoken."
                 ),
-                # Increase beam size for better accuracy during continuous speech
-                'beam_size': 7,  # Increased from 5 for better continuous speech handling
-                'beam_size_realtime': 5,  # Increased from 3 for better real-time accuracy
+                # Optimized beam size for better accuracy during fast and continuous speech
+                'beam_size': 10,  # Higher beam size for final transcription = better accuracy
+                'beam_size_realtime': 7,  # Higher real-time beam = better accuracy for fast speech (7-8 is optimal balance)
+                # Note: compression_ratio_threshold, log_prob_threshold, and no_speech_threshold are not 
+                # direct AudioToTextRecorder parameters - they're lower-level Whisper parameters
+                # that are handled internally by the model configuration
                 'no_log_file': True,
-                'silero_use_onnx': True,
                 'faster_whisper_vad_filter': True,  # Enable VAD filtering to prevent "No clip timestamps" error
                 # Try to ensure microphone access
                 'use_microphone': True,  # Explicitly enable microphone
