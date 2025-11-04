@@ -48,6 +48,12 @@ npm install
    
    - Save the file
 
+4. Install depedencies
+
+```
+pip install -r requirements.txt
+```
+
 ### Running the App
 
 #### Method 1: Development Mode (Recommended for first run)
