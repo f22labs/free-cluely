@@ -300,6 +300,52 @@ class RealtimeSTTService:
                 import traceback
                 self._send_error(f"[DEBUG] Callback traceback: {traceback.format_exc()}")
         
+        # Platform detection and M1-specific diagnostics
+        import platform
+        system_info = platform.system()
+        machine = platform.machine()
+        self._send_error(f"[PLATFORM] System: {system_info}, Architecture: {machine}")
+        
+        # Check for Apple Silicon (M1/M2/M3/M4)
+        is_apple_silicon = machine == 'arm64' and system_info == 'Darwin'
+        if is_apple_silicon:
+            self._send_error(f"[PLATFORM] ⚠️  Detected Apple Silicon (M1/M2/M3/M4) - checking compatibility...")
+            
+            # Test microphone access before creating recorder
+            try:
+                import pyaudio
+                p_test = pyaudio.PyAudio()
+                try:
+                    default_input = p_test.get_default_input_device_info()
+                    self._send_error(f"[PLATFORM] ✓ Microphone detected: {default_input['name']}")
+                    self._send_error(f"[PLATFORM] ✓ Microphone index: {default_input['index']}")
+                    self._send_error(f"[PLATFORM] ✓ Sample rate: {default_input['defaultSampleRate']} Hz")
+                    
+                    # Try to open a test stream
+                    test_stream = p_test.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=16000,
+                        input=True,
+                        frames_per_buffer=1024
+                    )
+                    self._send_error(f"[PLATFORM] ✓✓✓ Microphone stream test PASSED on Apple Silicon ✓✓✓")
+                    test_stream.stop_stream()
+                    test_stream.close()
+                except Exception as mic_error:
+                    self._send_error(f"[PLATFORM] ✗✗✗ Microphone access test FAILED on Apple Silicon ✗✗✗")
+                    self._send_error(f"[PLATFORM] Error: {mic_error}")
+                    self._send_error(f"[PLATFORM] Possible causes:")
+                    self._send_error(f"[PLATFORM]   1. Microphone permissions not granted")
+                    self._send_error(f"[PLATFORM]   2. PyAudio/PortAudio compatibility issue")
+                    self._send_error(f"[PLATFORM]   3. Try: brew install portaudio && pip install --force-reinstall pyaudio")
+                finally:
+                    p_test.terminate()
+            except ImportError:
+                self._send_error(f"[PLATFORM] ⚠️  PyAudio not available for microphone test")
+            except Exception as e:
+                self._send_error(f"[PLATFORM] ⚠️  Error testing microphone: {e}")
+        
         # Create recorder with callbacks
         try:
             recorder_config = {
@@ -352,11 +398,38 @@ class RealtimeSTTService:
             
             try:
                 self._send_error(f"[DEBUG] Creating recorder with VAD: silero={recorder_config['silero_sensitivity']}, webrtc={recorder_config['webrtc_sensitivity']}")
+                
+                if is_apple_silicon:
+                    self._send_error(f"[PLATFORM] Creating AudioToTextRecorder on Apple Silicon...")
+                    self._send_error(f"[PLATFORM] This may take longer on M1/M2/M3 due to model loading...")
+                
                 self.recorder = AudioToTextRecorder(**recorder_config)
                 self._send_error("[DEBUG] AudioToTextRecorder created successfully")
                 self._send_error("[DEBUG] Recorder is ready to listen for audio")
+                
+                # Additional M1-specific verification
+                if is_apple_silicon:
+                    self._send_error(f"[PLATFORM] ✓ Recorder created on Apple Silicon")
+                    # Try to verify audio access is working
+                    try:
+                        import pyaudio
+                        p_verify = pyaudio.PyAudio()
+                        # Get the device that will be used
+                        default_input = p_verify.get_default_input_device_info()
+                        self._send_error(f"[PLATFORM] ✓ Will use microphone: {default_input['name']} (index: {default_input['index']})")
+                        p_verify.terminate()
+                    except Exception as verify_error:
+                        self._send_error(f"[PLATFORM] ⚠️  Could not verify microphone: {verify_error}")
+                
             except Exception as init_error:
                 self._send_error(f"[DEBUG] ERROR creating recorder: {init_error}")
+                if is_apple_silicon:
+                    self._send_error(f"[PLATFORM] ✗✗✗ Recorder creation failed on Apple Silicon ✗✗✗")
+                    self._send_error(f"[PLATFORM] Common fixes for M1/M2/M3:")
+                    self._send_error(f"[PLATFORM]   1. Install PortAudio: brew install portaudio")
+                    self._send_error(f"[PLATFORM]   2. Reinstall PyAudio: pip install --force-reinstall pyaudio")
+                    self._send_error(f"[PLATFORM]   3. Check microphone permissions in System Settings")
+                    self._send_error(f"[PLATFORM]   4. Try running from Terminal (not IDE) to get permission prompt")
                 import traceback
                 self._send_error(f"[DEBUG] Init traceback: {traceback.format_exc()}")
                 raise
@@ -440,6 +513,16 @@ class RealtimeSTTService:
                     #   - on_transcription_complete (when sentence ends)
                     # It should return the transcribed text or None
                     self._send_error(f"[DEBUG] Calling recorder.text() - iteration {iteration}")
+                    
+                    if is_apple_silicon:
+                        self._send_error(f"[PLATFORM] ⚠️  On Apple Silicon: recorder.text() may block silently if microphone not accessible")
+                        self._send_error(f"[PLATFORM] ⚠️  If no callbacks fire, check:")
+                        self._send_error(f"[PLATFORM]      - Microphone permissions granted?")
+                        self._send_error(f"[PLATFORM]      - Is microphone actually receiving audio?")
+                        self._send_error(f"[PLATFORM]      - Try running: python3 mic_testing.py to test microphone")
+                        self._send_error(f"[PLATFORM] ⚠️  If stuck after 30s, it's likely a microphone access issue")
+                    
+                    # Call recorder.text() - this blocks until speech is detected
                     result = self.recorder.text(on_transcription_complete)
                     
                     self._send_error(f"[FLOW] ✓ recorder.text() RETURNED after blocking")

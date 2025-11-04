@@ -20,17 +20,86 @@ def test_microphone():
         
         p = pyaudio.PyAudio()
         
+        # List all available audio devices
+        print(f"\n{'='*60}")
+        print(f"[AUDIO TEST] Available Audio Devices:")
+        print(f"{'='*60}")
+        device_count = p.get_device_count()
+        print(f"[AUDIO TEST] Total devices found: {device_count}\n")
+        
+        input_devices = []
+        output_devices = []
+        
+        for i in range(device_count):
+            try:
+                device_info = p.get_device_info_by_index(i)
+                device_name = device_info['name']
+                max_input_channels = device_info['maxInputChannels']
+                max_output_channels = device_info['maxOutputChannels']
+                default_sample_rate = device_info['defaultSampleRate']
+                
+                device_type = []
+                if max_input_channels > 0:
+                    device_type.append("INPUT")
+                    input_devices.append((i, device_name, max_input_channels, default_sample_rate))
+                if max_output_channels > 0:
+                    device_type.append("OUTPUT")
+                    output_devices.append((i, device_name, max_output_channels, default_sample_rate))
+                
+                type_str = "/".join(device_type) if device_type else "N/A"
+                is_default_input = (i == p.get_default_input_device_info()['index'])
+                is_default_output = (i == p.get_default_output_device_info()['index'])
+                
+                default_markers = []
+                if is_default_input:
+                    default_markers.append("(DEFAULT INPUT)")
+                if is_default_output:
+                    default_markers.append("(DEFAULT OUTPUT)")
+                
+                default_str = " ".join(default_markers) if default_markers else ""
+                
+                print(f"[AUDIO TEST]   Device {i}: {device_name} [{type_str}] {default_str}")
+                if max_input_channels > 0:
+                    print(f"[AUDIO TEST]      → Input channels: {max_input_channels}, Sample rate: {default_sample_rate} Hz")
+                if max_output_channels > 0:
+                    print(f"[AUDIO TEST]      → Output channels: {max_output_channels}, Sample rate: {default_sample_rate} Hz")
+                print()
+            except Exception as e:
+                print(f"[AUDIO TEST]   Device {i}: Error getting info - {e}")
+        
         # Get default input device info
+        print(f"{'='*60}")
+        print(f"[AUDIO TEST] Device Selection:")
+        print(f"{'='*60}")
         try:
             default_input = p.get_default_input_device_info()
-            print(f"\n[AUDIO TEST] Using microphone: {default_input['name']}")
-            print(f"[AUDIO TEST] Sample rate: {default_input['defaultSampleRate']} Hz")
-            print(f"[AUDIO TEST] Max input channels: {default_input['maxInputChannels']}")
+            default_input_index = default_input['index']
+            print(f"\n[AUDIO TEST] 📥 INPUT DEVICE (for recording):")
+            print(f"[AUDIO TEST]   Device Index: {default_input_index}")
+            print(f"[AUDIO TEST]   Device Name: {default_input['name']}")
+            print(f"[AUDIO TEST]   Sample Rate: {default_input['defaultSampleRate']} Hz")
+            print(f"[AUDIO TEST]   Max Input Channels: {default_input['maxInputChannels']}")
         except Exception as e:
-            print(f"[AUDIO TEST] Warning: Could not get device info: {e}")
+            print(f"[AUDIO TEST] ⚠️  Warning: Could not get default input device info: {e}")
+            default_input_index = None
+        
+        try:
+            default_output = p.get_default_output_device_info()
+            default_output_index = default_output['index']
+            print(f"\n[AUDIO TEST] 📤 OUTPUT DEVICE (for playback):")
+            print(f"[AUDIO TEST]   Device Index: {default_output_index}")
+            print(f"[AUDIO TEST]   Device Name: {default_output['name']}")
+            print(f"[AUDIO TEST]   Sample Rate: {default_output['defaultSampleRate']} Hz")
+            print(f"[AUDIO TEST]   Max Output Channels: {default_output['maxOutputChannels']}")
+        except Exception as e:
+            print(f"[AUDIO TEST] ⚠️  Warning: Could not get default output device info: {e}")
+            default_output_index = None
         
         # Open input stream for recording
-        print(f"\n[AUDIO TEST] Opening microphone for recording...")
+        print(f"\n{'='*60}")
+        print(f"[AUDIO TEST] Opening microphone for recording...")
+        print(f"{'='*60}")
+        
         input_stream = p.open(
             format=FORMAT,
             channels=CHANNELS,
@@ -39,7 +108,20 @@ def test_microphone():
             frames_per_buffer=CHUNK
         )
         
-        print(f"[AUDIO TEST] ✓ Microphone stream opened successfully!")
+        # Get the actual device info being used (using default input device index)
+        if default_input_index is not None:
+            actual_input_info = p.get_device_info_by_index(default_input_index)
+            actual_input_latency = input_stream.get_input_latency()
+            
+            print(f"[AUDIO TEST] ✓✓✓ INPUT STREAM OPENED ✓✓✓")
+            print(f"[AUDIO TEST]   → Using Device Index: {default_input_index}")
+            print(f"[AUDIO TEST]   → Device Name: {actual_input_info['name']}")
+            print(f"[AUDIO TEST]   → Sample Rate: {actual_input_info['defaultSampleRate']} Hz")
+            print(f"[AUDIO TEST]   → Input Latency: {actual_input_info['defaultLowInputLatency']:.3f}s (low), {actual_input_info['defaultHighInputLatency']:.3f}s (high)")
+            print(f"[AUDIO TEST]   → Current Stream Latency: {actual_input_latency:.3f}s")
+        else:
+            print(f"[AUDIO TEST] ✓✓✓ INPUT STREAM OPENED ✓✓✓")
+            print(f"[AUDIO TEST]   → Using default input device (index not available)")
         print(f"\n[AUDIO TEST] ⏺️  Recording for {RECORD_SECONDS} seconds...")
         print(f"[AUDIO TEST] Please speak now! (Recording in progress...)")
         
@@ -79,6 +161,10 @@ def test_microphone():
         time.sleep(0.5)  # Brief pause before playback
         
         # Open output stream for playback
+        print(f"\n{'='*60}")
+        print(f"[AUDIO TEST] Opening audio output for playback...")
+        print(f"{'='*60}")
+        
         output_stream = p.open(
             format=FORMAT,
             channels=CHANNELS,
@@ -87,8 +173,23 @@ def test_microphone():
             frames_per_buffer=CHUNK
         )
         
+        # Get the actual device info being used (using default output device index)
+        if default_output_index is not None:
+            actual_output_info = p.get_device_info_by_index(default_output_index)
+            actual_output_latency = output_stream.get_output_latency()
+            
+            print(f"[AUDIO TEST] ✓✓✓ OUTPUT STREAM OPENED ✓✓✓")
+            print(f"[AUDIO TEST]   → Using Device Index: {default_output_index}")
+            print(f"[AUDIO TEST]   → Device Name: {actual_output_info['name']}")
+            print(f"[AUDIO TEST]   → Sample Rate: {actual_output_info['defaultSampleRate']} Hz")
+            print(f"[AUDIO TEST]   → Output Latency: {actual_output_info['defaultLowOutputLatency']:.3f}s (low), {actual_output_info['defaultHighOutputLatency']:.3f}s (high)")
+            print(f"[AUDIO TEST]   → Current Stream Latency: {actual_output_latency:.3f}s")
+        else:
+            print(f"[AUDIO TEST] ✓✓✓ OUTPUT STREAM OPENED ✓✓✓")
+            print(f"[AUDIO TEST]   → Using default output device (index not available)")
+        
         # Play back audio
-        print(f"[AUDIO TEST] Playing {RECORD_SECONDS} seconds of recorded audio...")
+        print(f"\n[AUDIO TEST] Playing {RECORD_SECONDS} seconds of recorded audio...")
         for i in range(0, len(audio_data_bytes), CHUNK):
             chunk = audio_data_bytes[i:i + CHUNK]
             output_stream.write(chunk)
