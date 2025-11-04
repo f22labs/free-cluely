@@ -154,6 +154,8 @@ class RealtimeSTTService:
         
         def on_realtime_update(text):
             """Callback for real-time transcription updates"""
+            # FIRST LOG - this confirms callback was triggered (audio is being received!)
+            self._send_error(f"[FLOW] ✓✓✓ on_realtime_update CALLBACK TRIGGERED ✓✓✓")
             # DEBUG: Always log when callback is called (even if empty)
             self._send_error(f"[DEBUG] on_realtime_update CALLED with text='{text}' (type: {type(text)}, len: {len(text) if text else 0})")
             
@@ -361,6 +363,8 @@ class RealtimeSTTService:
             
             self.start_recording()
             self._send_message({"type": "status", "status": "ready"})
+            self._send_error("[FLOW] ✓ Status: ready sent")
+            self._send_error("[FLOW] Recorder started. Starting transcription loop...")
             self._send_error("[DEBUG] Recorder started. Starting transcription loop. Listening for audio...")
             self._send_error("[DEBUG] Speak now - callbacks should fire when speech is detected!")
             
@@ -373,7 +377,9 @@ class RealtimeSTTService:
             def stdin_listener():
                 try:
                     while True:
+                        self._send_error("[DEBUG] Listening...")
                         line = sys.stdin.readline()
+                        self._send_error(f"[DEBUG] line: {line}")
                         if not line:
                             break
                         try:
@@ -388,6 +394,7 @@ class RealtimeSTTService:
             
             stdin_thread = threading.Thread(target=stdin_listener, daemon=True)
             stdin_thread.start()
+            self._send_error("[FLOW] ✓ stdin listener thread started")
             
             # Main transcription loop - recorder.text() requires a callback
             # This matches the pattern from realtime_stt.py: while True: recorder.text(callback)
@@ -395,8 +402,10 @@ class RealtimeSTTService:
             consecutive_errors = 0
             max_consecutive_errors = 5
             
+            self._send_error("[FLOW] ===== Starting main transcription loop ======")
             while True:
                 iteration += 1
+                self._send_error(f"[FLOW] ===== ENTERING LOOP ITERATION {iteration} =====")
                 self._send_error(f"[DEBUG] ===== Loop iteration {iteration} ===== (errors: {consecutive_errors})")
                 
                 try:
@@ -411,11 +420,16 @@ class RealtimeSTTService:
                     
                     # Validate recorder before using
                     if self.recorder is None:
+                        self._send_error("[FLOW] ✗ ERROR: Recorder is None! Cannot continue.")
                         self._send_error("[DEBUG] ERROR: Recorder is None! Cannot continue.")
                         break
                     
+                    self._send_error(f"[FLOW] ✓ Recorder validated (not None)")
+                    
                     # Get transcription - pass callback function (blocks until speech is detected)
                     # This matches the pattern: recorder.text(callback)
+                    self._send_error(f"[FLOW] About to call recorder.text() - iteration {iteration}")
+                    self._send_error(f"[FLOW] ⏳ recorder.text() will now BLOCK and wait for speech detection...")
                     self._send_error(f"[DEBUG] About to call recorder.text() - iteration {iteration}")
                     self._send_error(f"[DEBUG] WAITING for speech... (this blocks until VAD detects speech)")
                     self._send_error(f"[DEBUG] VAD Settings: silero={recorder_config.get('silero_sensitivity')}, webrtc={recorder_config.get('webrtc_sensitivity')}")
@@ -425,7 +439,11 @@ class RealtimeSTTService:
                     #   - on_realtime_transcription_update (continuously as you speak)
                     #   - on_transcription_complete (when sentence ends)
                     # It should return the transcribed text or None
+                    self._send_error(f"[DEBUG] Calling recorder.text() - iteration {iteration}")
                     result = self.recorder.text(on_transcription_complete)
+                    
+                    self._send_error(f"[FLOW] ✓ recorder.text() RETURNED after blocking")
+                    self._send_error(f"[FLOW] recorder.text() completed - result received")
                     
                     # Reset error counter on success
                     consecutive_errors = 0
