@@ -280,4 +280,18 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { isActive: false }
     }
   })
+
+  // Meeting Assistant handlers
+  ipcMain.handle("generate-meeting-suggestion", async (event, transcript: string, systemPrompt: string) => {
+    try {
+      console.log("[IPC] generate-meeting-suggestion called with transcript length:", transcript.length)
+      const llmHelper = appState.processingHelper.getLLMHelper()
+      const suggestion = await llmHelper.generateMeetingSuggestion(transcript, systemPrompt)
+      console.log("[IPC] Generated suggestion:", suggestion)
+      return suggestion
+    } catch (error: any) {
+      console.error("Error in generate-meeting-suggestion handler:", error)
+      throw error
+    }
+  })
 }

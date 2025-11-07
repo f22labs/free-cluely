@@ -3,6 +3,7 @@ import Queue from "./_pages/Queue"
 import { ToastViewport } from "@radix-ui/react-toast"
 import { useEffect, useRef, useState } from "react"
 import Solutions from "./_pages/Solutions"
+import MeetingAssistant from "./_pages/MeetingAssistant"
 import { QueryClient, QueryClientProvider } from "react-query"
 
 declare global {
@@ -71,7 +72,7 @@ const queryClient = new QueryClient({
 })
 
 const App: React.FC = () => {
-  const [view, setView] = useState<"queue" | "solutions" | "debug">("queue")
+  const [view, setView] = useState<"queue" | "solutions" | "debug" | "meeting">("queue")
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Effect for height monitoring
@@ -171,6 +172,8 @@ const App: React.FC = () => {
             <Queue setView={setView} />
           ) : view === "solutions" ? (
             <Solutions setView={setView} />
+          ) : view === "meeting" ? (
+            <MeetingAssistant setView={setView} />
           ) : (
             <></>
           )}

@@ -243,6 +243,22 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
               onSettingsToggle={handleSettingsToggle}
             />
           </div>
+          
+          {/* Meeting Assistant Button */}
+          <div className="mt-3 mb-3">
+            <button
+              className="w-full px-4 py-3 rounded-lg bg-blue-600/90 hover:bg-blue-600 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2 shadow-lg"
+              onClick={() => {
+                console.log("[Queue] Navigating to Meeting Assistant")
+                setView("meeting")
+              }}
+              type="button"
+            >
+              <span className="text-lg">🤝</span>
+              <span>Meeting Assistant</span>
+            </button>
+          </div>
+          
           {/* Conditional Settings Interface */}
           {isSettingsOpen && (
             <div className="mt-4 w-full mx-auto">
