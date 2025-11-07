@@ -56,6 +56,9 @@ interface ElectronAPI {
   switchToGemini: (apiKey?: string) => Promise<{ success: boolean; error?: string }>
   testLlmConnection: () => Promise<{ success: boolean; error?: string }>
   
+  // Meeting Assistant
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation" }>
+  
   invoke: (channel: string, ...args: any[]) => Promise<any>
 }
 
@@ -234,6 +237,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   switchToOllama: (model?: string, url?: string) => ipcRenderer.invoke("switch-to-ollama", model, url),
   switchToGemini: (apiKey?: string) => ipcRenderer.invoke("switch-to-gemini", apiKey),
   testLlmConnection: () => ipcRenderer.invoke("test-llm-connection"),
+  
+  // Meeting Assistant
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => 
+    ipcRenderer.invoke("generate-meeting-suggestion", transcript, systemPrompt),
   
   invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args)
 } as ElectronAPI)

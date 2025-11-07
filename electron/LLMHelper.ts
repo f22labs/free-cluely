@@ -415,4 +415,138 @@ export class LLMHelper {
       return { success: false, error: error.message };
     }
   }
+
+  /**
+   * Retry a function with exponential backoff for rate limit errors
+   * @param fn Function to retry
+   * @param maxRetries Maximum number of retries
+   * @param baseDelay Base delay in milliseconds
+   * @returns Result of the function
+   */
+  private async retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        lastError = error;
+        
+        // Check error status code and message
+        const statusCode = error.status || error.statusCode || error.code;
+        const errorMessage = error.message || String(error) || "";
+        const errorString = errorMessage.toLowerCase();
+        
+        // Check if it's a rate limit error (429)
+        const isRateLimit = statusCode === 429 || 
+                           errorString.includes("429") || 
+                           errorString.includes("too many requests") ||
+                           errorString.includes("resource exhausted") ||
+                           errorString.includes("rate limit");
+        
+        // Check if it's a quota error
+        const isQuotaError = errorString.includes("quota") || 
+                            errorString.includes("quota exceeded");
+        
+        // Check if it's a temporary server error (5xx)
+        const isServerError = statusCode >= 500 && statusCode < 600;
+        
+        // Retry on rate limit, quota, or server errors
+        if ((isRateLimit || isQuotaError || isServerError) && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+          const errorType = isRateLimit ? "rate limit" : isQuotaError ? "quota" : "server error";
+          console.log(`[LLMHelper] ${errorType} error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // For other errors or if we've exhausted retries, throw immediately
+        throw error;
+      }
+    }
+    
+    throw lastError;
+  }
+
+  /**
+   * Generate meeting suggestions based on transcript and system prompt
+   * @param transcript Current meeting transcript
+   * @param systemPrompt Context about the person and meeting
+   * @returns Suggestion text and type
+   */
+  public async generateMeetingSuggestion(
+    transcript: string,
+    systemPrompt: string
+  ): Promise<{ text: string; type: "response" | "question" | "negotiation" }> {
+    try {
+      const prompt = `You are an AI meeting assistant helping during a live meeting. 
+
+SYSTEM CONTEXT:
+${systemPrompt}
+
+CURRENT MEETING TRANSCRIPT:
+${transcript}
+
+TASK:
+Based on the conversation so far, provide a helpful suggestion for what the person should say or do next. Consider:
+1. If the client asked a question, suggest an empathetic and technically accurate response
+2. If there's a negotiation point, suggest a balanced approach
+3. If the conversation needs direction, suggest a question or topic to bring up
+4. Be concise (2-3 sentences max)
+5. Be empathetic to client concerns while maintaining technical accuracy
+6. Consider the context of the meeting and the person's role
+
+Provide ONLY the suggestion text, no labels or prefixes. Be natural and conversational.`;
+
+      // Use retry logic with exponential backoff for rate limit errors
+      const responseText = await this.retryWithBackoff(async () => {
+        if (this.useOllama) {
+          return await this.callOllama(prompt);
+        } else if (this.model) {
+          const result = await this.model.generateContent(prompt);
+          const response = await result.response;
+          return response.text();
+        } else {
+          throw new Error("No LLM provider configured");
+        }
+      }, 3, 1000); // 3 retries, starting with 1 second delay
+
+      // Determine suggestion type based on content
+      const lowerText = responseText.toLowerCase();
+      let type: "response" | "question" | "negotiation" = "response";
+      
+      if (lowerText.includes("?") || lowerText.includes("ask") || lowerText.includes("question")) {
+        type = "question";
+      } else if (
+        lowerText.includes("price") || 
+        lowerText.includes("cost") || 
+        lowerText.includes("deal") || 
+        lowerText.includes("negotiate") ||
+        lowerText.includes("discount") ||
+        lowerText.includes("contract")
+      ) {
+        type = "negotiation";
+      }
+
+      return {
+        text: responseText.trim(),
+        type
+      };
+    } catch (error: any) {
+      console.error("[LLMHelper] Error generating meeting suggestion:", error);
+      
+      // Provide user-friendly error messages
+      if (error.message?.includes("429") || error.message?.includes("Too Many Requests")) {
+        throw new Error("API rate limit exceeded. Please wait a moment and try again. The system will automatically retry.");
+      } else if (error.message?.includes("quota") || error.message?.includes("Quota exceeded")) {
+        throw new Error("API quota exceeded. Please check your API usage limits.");
+      } else {
+        throw error;
+      }
+    }
+  }
 } 
