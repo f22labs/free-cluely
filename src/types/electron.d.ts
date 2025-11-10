@@ -1,3 +1,53 @@
+export interface RealtimePartialMetrics {
+  iteration?: number | null
+  partial_index?: number | null
+  latency_ms?: number | null
+  first_partial_latency_ms?: number | null
+  python_iteration_started_at?: string | null
+  python_iteration_started_epoch_ms?: number | null
+  python_emit_timestamp?: string | null
+  python_emit_epoch_ms?: number | null
+  electron_emit_timestamp?: string
+  electron_emit_epoch_ms?: number
+}
+
+export interface RealtimeCompleteMetrics extends RealtimePartialMetrics {
+  transcription_latency_ms?: number | null
+  partial_update_count?: number | null
+  python_completion_timestamp?: string | null
+  python_completion_epoch_ms?: number | null
+  electron_received_epoch_ms?: number
+  python_to_electron_ms?: number | null
+  fallback_used?: boolean
+}
+
+export interface MeetingSuggestionTimelineMetrics {
+  iteration: number | null
+  python_latency_ms: number | null
+  python_first_partial_latency_ms: number | null
+  python_to_electron_ms: number | null
+  electron_received_epoch_ms: number
+  electron_emit_timestamp: string
+  renderer_request_epoch_ms: number
+  transcription_to_request_ms: number
+  transcription_to_request_python_ms: number | null
+  fallback_used: boolean
+  partial_update_count: number | null
+}
+
+export interface MeetingSuggestionMetrics {
+  provider: "ollama" | "gemini"
+  model: string
+  attempts: number
+  llm_duration_ms: number
+  llm_started_at: string
+  llm_completed_at: string
+  llm_round_trip_duration_ms?: number
+  renderer_request_epoch_ms?: number
+  renderer_response_epoch_ms?: number
+  transcription_timeline?: MeetingSuggestionTimelineMetrics | null
+}
+
 export interface ElectronAPI {
   updateContentDimensions: (dimensions: {
     width: number
@@ -17,8 +67,8 @@ export interface ElectronAPI {
   onSolutionSuccess: (callback: (data: any) => void) => () => void
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
-  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => () => void
-  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => () => void
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => () => void
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
@@ -37,6 +87,7 @@ export interface ElectronAPI {
   stopRealTimeTranscription: () => Promise<{ success: boolean; filePath?: string; error?: string }>
   getRealTimeTranscript: () => Promise<{ success: boolean; transcript: string | null; error?: string }>
   isRealTimeTranscriptionActive: () => Promise<{ isActive: boolean }>
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation"; metrics?: MeetingSuggestionMetrics }>
   invoke: (channel: string, ...args: any[]) => Promise<any>
 }
 
@@ -44,4 +95,4 @@ declare global {
   interface Window {
     electronAPI: ElectronAPI
   }
-} 
+}

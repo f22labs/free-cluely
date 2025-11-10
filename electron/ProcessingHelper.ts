@@ -7,17 +7,39 @@ import path from "node:path"
 import fs from "node:fs"
 import { app } from "electron"
 import { spawn, ChildProcess } from "child_process"
+import { logger } from "./logger"
 
 // Transcripts directory - saved to project root for easy access
 // Note: When compiled, __dirname will be dist-electron, so this resolves to project root/transcripts
 const TRANSCRIPTS_DIR = path.resolve(path.join(__dirname, "..", "transcripts"))
-console.log(`[ProcessingHelper] Transcripts directory will be: ${TRANSCRIPTS_DIR}`)
+logger.info("[ProcessingHelper] Transcripts directory will be:", TRANSCRIPTS_DIR)
 
 dotenv.config()
 
 const isDev = process.env.NODE_ENV === "development"
 const isDevTest = process.env.IS_DEV_TEST === "true"
 const MOCK_API_WAIT_TIME = Number(process.env.MOCK_API_WAIT_TIME) || 500
+const metricsLoggingEnabled = process.env.RTSTT_METRICS_LOG === "1"
+
+interface TranscriptionMetricsSnapshot {
+  iteration: number | null
+  pythonLatencyMs: number | null
+  firstPartialLatencyMs: number | null
+  partialUpdateCount: number | null
+  pythonIterationStartedAt: string | null
+  pythonCompletionTimestamp: string | null
+  pythonEmitEpochMs: number | null
+  pythonEmitTimestamp: string | null
+  pythonCompletionEpochMs: number | null
+  electronReceivedAt: number
+  electronEmitTimestamp: string
+  pythonToElectronMs: number | null
+  fallbackUsed: boolean
+  lastSuggestionRequestedAt?: number | null
+  lastSuggestionCompletedAt?: number | null
+  lastSuggestionDurationMs?: number | null
+  suggestionCount?: number | null
+}
 
 export class ProcessingHelper {
   private appState: AppState
@@ -30,6 +52,7 @@ export class ProcessingHelper {
     startTime: number
   } | null = null
   private realtimeSTTProcess: ChildProcess | null = null
+  private lastTranscriptionMetrics: TranscriptionMetricsSnapshot | null = null
 
   constructor(appState: AppState) {
     this.appState = appState
@@ -40,15 +63,39 @@ export class ProcessingHelper {
     const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434"
     
     if (useOllama) {
-      console.log("[ProcessingHelper] Initializing with Ollama")
+      logger.info("[ProcessingHelper] Initializing with Ollama")
       this.llmHelper = new LLMHelper(undefined, true, ollamaModel, ollamaUrl)
     } else {
       const apiKey = process.env.GEMINI_API_KEY
       if (!apiKey) {
         throw new Error("GEMINI_API_KEY not found in environment variables. Set GEMINI_API_KEY or enable Ollama with USE_OLLAMA=true")
       }
-      console.log("[ProcessingHelper] Initializing with Gemini")
+      logger.info("[ProcessingHelper] Initializing with Gemini")
       this.llmHelper = new LLMHelper(apiKey, false)
+    }
+  }
+
+  public getLastTranscriptionMetrics(): TranscriptionMetricsSnapshot | null {
+    return this.lastTranscriptionMetrics ? { ...this.lastTranscriptionMetrics } : null
+  }
+
+  public noteSuggestionRequest(): { metrics: TranscriptionMetricsSnapshot | null; requestEpochMs: number } {
+    const requestEpochMs = Date.now()
+    if (this.lastTranscriptionMetrics) {
+      this.lastTranscriptionMetrics.lastSuggestionRequestedAt = requestEpochMs
+      const currentCount = this.lastTranscriptionMetrics.suggestionCount ?? 0
+      this.lastTranscriptionMetrics.suggestionCount = currentCount + 1
+    }
+    return {
+      metrics: this.lastTranscriptionMetrics ? { ...this.lastTranscriptionMetrics } : null,
+      requestEpochMs
+    }
+  }
+
+  public noteSuggestionResponse(durationMs: number): void {
+    if (this.lastTranscriptionMetrics) {
+      this.lastTranscriptionMetrics.lastSuggestionCompletedAt = Date.now()
+      this.lastTranscriptionMetrics.lastSuggestionDurationMs = durationMs
     }
   }
 
@@ -77,7 +124,7 @@ export class ProcessingHelper {
           this.appState.setProblemInfo({ problem_statement: audioResult.text, input_format: {}, output_format: {}, constraints: [], test_cases: [] });
           return;
         } catch (err: any) {
-          console.error('Audio processing error:', err);
+          logger.error("Audio processing error:", err);
           mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR, err.message);
           return;
         }
@@ -101,7 +148,7 @@ export class ProcessingHelper {
         mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.PROBLEM_EXTRACTED, problemInfo);
         this.appState.setProblemInfo(problemInfo);
       } catch (error: any) {
-        console.error("Image processing error:", error)
+        logger.error("Image processing error:", error)
         mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.INITIAL_SOLUTION_ERROR, error.message)
       } finally {
         this.currentProcessingAbortController = null
@@ -111,7 +158,7 @@ export class ProcessingHelper {
       // Debug mode
       const extraScreenshotQueue = this.appState.getScreenshotHelper().getExtraScreenshotQueue()
       if (extraScreenshotQueue.length === 0) {
-        console.log("No extra screenshots to process")
+        logger.info("No extra screenshots to process")
         mainWindow.webContents.send(this.appState.PROCESSING_EVENTS.NO_SCREENSHOTS)
         return
       }
@@ -144,7 +191,7 @@ export class ProcessingHelper {
         )
 
       } catch (error: any) {
-        console.error("Debug processing error:", error)
+        logger.error("Debug processing error:", error)
         mainWindow.webContents.send(
           this.appState.PROCESSING_EVENTS.DEBUG_ERROR,
           error.message
@@ -181,16 +228,16 @@ export class ProcessingHelper {
       if (this.isRealTimeTranscriptionActive()) {
         // Append to the active session file
         await this.appendToRealTimeTranscript(transcript.text);
-        console.log(`[ProcessingHelper] Audio transcript appended to active session`);
+        logger.info("[ProcessingHelper] Audio transcript appended to active session");
       } else {
         // No active session - create a new file for this single audio analysis
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const filename = `transcript_${timestamp}.txt`;
         const filePath = await this.saveTranscriptToFile(transcript.text, filename);
-        console.log(`[ProcessingHelper] Audio transcript saved to: ${filePath}`);
+        logger.info("[ProcessingHelper] Audio transcript saved to:", filePath);
       }
     } catch (error) {
-      console.error("[ProcessingHelper] Error saving audio transcript:", error);
+      logger.error("[ProcessingHelper] Error saving audio transcript:", error);
       // Don't throw - we still want to return the result even if saving fails
     }
     
@@ -208,9 +255,9 @@ export class ProcessingHelper {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `transcript_${timestamp}.txt`;
       const savedFilePath = await this.saveTranscriptToFile(transcript.text, filename);
-      console.log(`[ProcessingHelper] Audio file transcript saved to: ${savedFilePath}`);
+      logger.info("[ProcessingHelper] Audio file transcript saved to:", savedFilePath);
     } catch (error) {
-      console.error("[ProcessingHelper] Error saving audio file transcript:", error);
+      logger.error("[ProcessingHelper] Error saving audio file transcript:", error);
       // Don't throw - we still want to return the result even if saving fails
     }
     
@@ -244,10 +291,10 @@ export class ProcessingHelper {
       // Write transcript to file
       await fs.promises.writeFile(filePath, transcriptText, "utf-8");
       
-      console.log(`[ProcessingHelper] Transcript saved to: ${filePath}`);
+      logger.info("[ProcessingHelper] Transcript saved to:", filePath);
       return filePath;
     } catch (error) {
-      console.error("[ProcessingHelper] Error saving transcript:", error);
+      logger.error("[ProcessingHelper] Error saving transcript:", error);
       throw error;
     }
   }
@@ -277,7 +324,7 @@ export class ProcessingHelper {
         timestamp: transcript.timestamp
       };
     } catch (error) {
-      console.error("[ProcessingHelper] Error in transcribeAndSaveAudioFile:", error);
+      logger.error("[ProcessingHelper] Error in transcribeAndSaveAudioFile:", error);
       throw error;
     }
   }
@@ -309,7 +356,7 @@ export class ProcessingHelper {
         timestamp: transcript.timestamp
       };
     } catch (error) {
-      console.error("[ProcessingHelper] Error in transcribeAndSaveAudioFromBase64:", error);
+      logger.error("[ProcessingHelper] Error in transcribeAndSaveAudioFromBase64:", error);
       throw error;
     }
   }
@@ -397,13 +444,29 @@ export class ProcessingHelper {
               // Try to parse as JSON first
               const message = JSON.parse(line);
               if (message.type === "error") {
-                console.error("[RealtimeSTT] Error:", message.error);
+                logger.error("[RealtimeSTT] Error:", message.error);
               } else if (message.type === "status") {
-                console.log("[RealtimeSTT] Status:", message.status);
+                logger.info("[RealtimeSTT] Status:", message.status);
+              } else if (message.type === "log") {
+                const level = (message.level || "debug") as string;
+                const payload = message.message ?? "";
+                switch (level) {
+                  case "info":
+                    logger.info("[RealtimeSTT]", payload);
+                    break;
+                  case "warn":
+                    logger.warn("[RealtimeSTT]", payload);
+                    break;
+                  case "error":
+                    logger.error("[RealtimeSTT]", payload);
+                    break;
+                  default:
+                    logger.debug("[RealtimeSTT]", payload);
+                }
               }
             } catch (e) {
               // Not JSON - print all stderr output (includes debug messages)
-              console.log("[RealtimeSTT DEBUG]", line);
+              logger.debug("[RealtimeSTT DEBUG]", line);
             }
           }
         }
@@ -411,19 +474,21 @@ export class ProcessingHelper {
       
       // Handle process exit
       pythonProcess.on("exit", (code) => {
-        console.log(`[RealtimeSTT] Process exited with code ${code}`);
+        logger.info("[RealtimeSTT] Process exited with code", code);
         this.realtimeSTTProcess = null;
       });
       
       pythonProcess.on("error", (error) => {
-        console.error("[RealtimeSTT] Process error:", error);
+        logger.error("[RealtimeSTT] Process error:", error);
         this.realtimeSTTProcess = null;
       });
       
-      console.log(`[ProcessingHelper] Real-time transcription session started with RealtimeSTT: ${filePath}`);
+      this.lastTranscriptionMetrics = null;
+      
+      logger.info("[ProcessingHelper] Real-time transcription session started with RealtimeSTT:", filePath);
       return filePath;
     } catch (error) {
-      console.error("[ProcessingHelper] Error starting real-time transcription:", error);
+      logger.error("[ProcessingHelper] Error starting real-time transcription:", error);
       throw error;
     }
   }
@@ -439,10 +504,29 @@ export class ProcessingHelper {
       case "realtime_update":
         // Real-time update - notify frontend (don't append to file, prevents duplicates)
         if (message.text && this.realTimeTranscriptSession) {
+          const metrics = message.metrics ?? {}
+          if (metricsLoggingEnabled && metrics) {
+            const iteration = metrics.iteration ?? "?"
+            const partialIndex = metrics.partial_index ?? "?"
+            const latency = typeof metrics.latency_ms === "number" ? metrics.latency_ms.toFixed(2) : "n/a"
+            const firstPartial = typeof metrics.first_partial_latency_ms === "number" ? metrics.first_partial_latency_ms.toFixed(2) : "n/a"
+            logger.info(
+              `[RealtimeSTT][Metrics][Partial] iteration ${iteration} partial ${partialIndex} latency=${latency}ms first=${firstPartial}ms`
+            )
+          }
+
+          const electronEmitEpochMs = Date.now()
+          const electronEmitIso = new Date(electronEmitEpochMs).toISOString()
+
           // Send update to frontend with full transcript context
           mainWindow.webContents.send("realtime-transcription-update", {
             text: message.text,  // Current partial sentence
-            fullTranscript: message.fullTranscript || message.text  // Complete + partial
+            fullTranscript: message.fullTranscript || message.text,  // Complete + partial
+            metrics: {
+              ...metrics,
+              electron_emit_timestamp: electronEmitIso,
+              electron_emit_epoch_ms: electronEmitEpochMs
+            }
           });
         }
         break;
@@ -450,24 +534,65 @@ export class ProcessingHelper {
       case "transcription_complete":
         // Completed transcription - update file and notify
         if (message.text && this.realTimeTranscriptSession) {
+          const metrics = message.metrics ?? {}
+          const now = Date.now()
+          const electronEmitIso = new Date(now).toISOString()
+          const pythonEmitEpochMs = typeof metrics.python_emit_epoch_ms === "number" ? metrics.python_emit_epoch_ms : null
+          const transportDelayMs = pythonEmitEpochMs !== null ? now - pythonEmitEpochMs : null
+          const pythonLatency = typeof metrics.transcription_latency_ms === "number" ? metrics.transcription_latency_ms : null
+          const partialCount = typeof metrics.partial_update_count === "number" ? metrics.partial_update_count : null
+          const firstPartialLatency = typeof metrics.first_partial_latency_ms === "number" ? metrics.first_partial_latency_ms : null
+          const iteration = typeof metrics.iteration === "number" ? metrics.iteration : null
+          const fallbackUsed = Boolean(metrics.fallback_used)
+
+          if (metricsLoggingEnabled) {
+            logger.info(
+              `[RealtimeSTT][Metrics][Complete] iteration ${iteration ?? "?"} python_latency=${pythonLatency ?? "n/a"}ms transport=${transportDelayMs ?? "n/a"}ms partials=${partialCount ?? "n/a"} fallback=${fallbackUsed ? "yes" : "no"}`
+            )
+          }
+
+          this.lastTranscriptionMetrics = {
+            iteration,
+            pythonLatencyMs: pythonLatency,
+            firstPartialLatencyMs: firstPartialLatency,
+            partialUpdateCount: partialCount,
+            pythonIterationStartedAt: typeof metrics.python_iteration_started_at === "string" ? metrics.python_iteration_started_at : null,
+            pythonCompletionTimestamp: typeof metrics.python_completion_timestamp === "string" ? metrics.python_completion_timestamp : null,
+            pythonEmitEpochMs,
+            pythonEmitTimestamp: typeof metrics.python_emit_timestamp === "string" ? metrics.python_emit_timestamp : null,
+            pythonCompletionEpochMs: typeof metrics.python_completion_epoch_ms === "number" ? metrics.python_completion_epoch_ms : null,
+            electronReceivedAt: now,
+            electronEmitTimestamp: electronEmitIso,
+            pythonToElectronMs: transportDelayMs,
+            fallbackUsed
+          }
+
           this.appendToRealTimeTranscript(message.text).catch(err => {
-            console.error("[ProcessingHelper] Error appending completed transcription:", err);
+            logger.error("[ProcessingHelper] Error appending completed transcription:", err);
           });
           
+          const payloadMetrics = {
+            ...metrics,
+            electron_received_epoch_ms: now,
+            electron_emit_timestamp: electronEmitIso,
+            python_to_electron_ms: transportDelayMs
+          }
+
           // Send complete transcription to frontend
           mainWindow.webContents.send("realtime-transcription-complete", {
             text: message.text,
-            fullTranscript: message.full_transcript || ""
+            fullTranscript: message.full_transcript || "",
+            metrics: payloadMetrics
           });
         }
         break;
         
       case "status":
-        console.log(`[RealtimeSTT] Status: ${message.status}`);
+        logger.info("[RealtimeSTT] Status:", message.status);
         break;
         
       case "error":
-        console.error(`[RealtimeSTT] Error: ${message.error}`);
+        logger.error("[RealtimeSTT] Error:", message.error);
         break;
     }
   }
@@ -490,7 +615,7 @@ export class ProcessingHelper {
       const content = await fs.promises.readFile(this.realTimeTranscriptSession.filePath, "utf-8");
       return content;
     } catch (error) {
-      console.error("[ProcessingHelper] Error appending to real-time transcript:", error);
+      logger.error("[ProcessingHelper] Error appending to real-time transcript:", error);
       throw error;
     }
   }
@@ -513,7 +638,7 @@ export class ProcessingHelper {
 
     // Validate audio data
     if (!data || data.length < 100) {
-      console.warn("[ProcessingHelper] Audio chunk too small, skipping transcription");
+      logger.warn("[ProcessingHelper] Audio chunk too small, skipping transcription");
       const currentTranscript = await this.getRealTimeTranscript();
       return {
         chunk: "",
@@ -558,11 +683,11 @@ export class ProcessingHelper {
       }
     } catch (error: any) {
       // Log the error but don't throw - we want to continue processing other chunks
-      console.error("[ProcessingHelper] Error processing real-time audio chunk:", error.message || error);
+      logger.error("[ProcessingHelper] Error processing real-time audio chunk:", error.message || error);
       
       // Check if it's a validation error - these are likely due to invalid/incomplete chunks
       if (error.message && (error.message.includes('400') || error.message.includes('invalid argument'))) {
-        console.warn("[ProcessingHelper] Skipping invalid audio chunk - likely too small or incomplete");
+        logger.warn("[ProcessingHelper] Skipping invalid audio chunk - likely too small or incomplete");
         
         // Return current transcript state without appending
         const currentTranscript = await this.getRealTimeTranscript();
@@ -604,7 +729,7 @@ export class ProcessingHelper {
             }
           }, 2000);
         } catch (err) {
-          console.error("[ProcessingHelper] Error stopping Python process:", err);
+          logger.error("[ProcessingHelper] Error stopping Python process:", err);
           if (this.realtimeSTTProcess) {
             this.realtimeSTTProcess.kill();
           }
@@ -626,14 +751,15 @@ export class ProcessingHelper {
         // File might not exist yet, that's okay
       }
       
-      console.log(`[ProcessingHelper] Real-time transcription session ended: ${filePath}`);
+      logger.info("[ProcessingHelper] Real-time transcription session ended:", filePath);
       
       // Clear session
       this.realTimeTranscriptSession = null;
+      this.lastTranscriptionMetrics = null;
       
       return filePath;
     } catch (error) {
-      console.error("[ProcessingHelper] Error stopping real-time transcription:", error);
+      logger.error("[ProcessingHelper] Error stopping real-time transcription:", error);
       throw error;
     }
   }
@@ -651,7 +777,7 @@ export class ProcessingHelper {
       const content = await fs.promises.readFile(this.realTimeTranscriptSession.filePath, "utf-8");
       return content;
     } catch (error) {
-      console.error("[ProcessingHelper] Error reading real-time transcript:", error);
+      logger.error("[ProcessingHelper] Error reading real-time transcript:", error);
       return null;
     }
   }

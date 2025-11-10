@@ -2,6 +2,9 @@
 
 import { ipcMain, app } from "electron"
 import { AppState } from "./main"
+import { logger } from "./logger"
+
+const metricsLoggingEnabled = process.env.RTSTT_METRICS_LOG === "1"
 
 export function initializeIpcHandlers(appState: AppState): void {
   ipcMain.handle(
@@ -23,13 +26,13 @@ export function initializeIpcHandlers(appState: AppState): void {
       const preview = await appState.getImagePreview(screenshotPath)
       return { path: screenshotPath, preview }
     } catch (error) {
-      console.error("Error taking screenshot:", error)
+      logger.error("Error taking screenshot:", error)
       throw error
     }
   })
 
   ipcMain.handle("get-screenshots", async () => {
-    console.log({ view: appState.getView() })
+    logger.debug("[IPC] Current view:", appState.getView())
     try {
       let previews = []
       if (appState.getView() === "queue") {
@@ -47,10 +50,10 @@ export function initializeIpcHandlers(appState: AppState): void {
           }))
         )
       }
-      previews.forEach((preview: any) => console.log(preview.path))
+      previews.forEach((preview: any) => logger.debug("[IPC] Screenshot path:", preview.path))
       return previews
     } catch (error) {
-      console.error("Error getting screenshots:", error)
+      logger.error("Error getting screenshots:", error)
       throw error
     }
   })
@@ -62,10 +65,10 @@ export function initializeIpcHandlers(appState: AppState): void {
   ipcMain.handle("reset-queues", async () => {
     try {
       appState.clearQueues()
-      console.log("Screenshot queues have been cleared.")
+      logger.info("Screenshot queues have been cleared.")
       return { success: true }
     } catch (error: any) {
-      console.error("Error resetting queues:", error)
+      logger.error("Error resetting queues:", error)
       return { success: false, error: error.message }
     }
   })
@@ -76,7 +79,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.processAudioBase64(data, mimeType)
       return result
     } catch (error: any) {
-      console.error("Error in analyze-audio-base64 handler:", error)
+      logger.error("Error in analyze-audio-base64 handler:", error)
       throw error
     }
   })
@@ -87,7 +90,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.processAudioFile(path)
       return result
     } catch (error: any) {
-      console.error("Error in analyze-audio-file handler:", error)
+      logger.error("Error in analyze-audio-file handler:", error)
       throw error
     }
   })
@@ -98,7 +101,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.getLLMHelper().analyzeImageFile(path)
       return result
     } catch (error: any) {
-      console.error("Error in analyze-image-file handler:", error)
+      logger.error("Error in analyze-image-file handler:", error)
       throw error
     }
   })
@@ -108,7 +111,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.getLLMHelper().chatWithGemini(message);
       return result;
     } catch (error: any) {
-      console.error("Error in gemini-chat handler:", error);
+      logger.error("Error in gemini-chat handler:", error);
       throw error;
     }
   });
@@ -148,7 +151,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         isOllama: llmHelper.isUsingOllama()
       };
     } catch (error: any) {
-      console.error("Error getting current LLM config:", error);
+      logger.error("Error getting current LLM config:", error);
       throw error;
     }
   });
@@ -159,7 +162,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const models = await llmHelper.getOllamaModels();
       return models;
     } catch (error: any) {
-      console.error("Error getting Ollama models:", error);
+      logger.error("Error getting Ollama models:", error);
       throw error;
     }
   });
@@ -170,7 +173,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       await llmHelper.switchToOllama(model, url);
       return { success: true };
     } catch (error: any) {
-      console.error("Error switching to Ollama:", error);
+      logger.error("Error switching to Ollama:", error);
       return { success: false, error: error.message };
     }
   });
@@ -181,7 +184,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       await llmHelper.switchToGemini(apiKey);
       return { success: true };
     } catch (error: any) {
-      console.error("Error switching to Gemini:", error);
+      logger.error("Error switching to Gemini:", error);
       return { success: false, error: error.message };
     }
   });
@@ -192,7 +195,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await llmHelper.testConnection();
       return result;
     } catch (error: any) {
-      console.error("Error testing LLM connection:", error);
+      logger.error("Error testing LLM connection:", error);
       return { success: false, error: error.message };
     }
   });
@@ -203,7 +206,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.transcribeAndSaveAudioFile(audioPath, customPrompt, filename)
       return result
     } catch (error: any) {
-      console.error("Error in transcribe-audio-file handler:", error)
+      logger.error("Error in transcribe-audio-file handler:", error)
       throw error
     }
   })
@@ -214,7 +217,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.transcribeAndSaveAudioFromBase64(data, mimeType, customPrompt, filename)
       return result
     } catch (error: any) {
-      console.error("Error in transcribe-audio-base64 handler:", error)
+      logger.error("Error in transcribe-audio-base64 handler:", error)
       throw error
     }
   })
@@ -225,7 +228,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const filePath = await appState.processingHelper.saveTranscriptToFile(transcriptText, filename)
       return { success: true, filePath }
     } catch (error: any) {
-      console.error("Error in save-transcript handler:", error)
+      logger.error("Error in save-transcript handler:", error)
       return { success: false, error: error.message }
     }
   })
@@ -236,7 +239,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const filePath = await appState.processingHelper.startRealTimeTranscription(filename)
       return { success: true, filePath }
     } catch (error: any) {
-      console.error("Error in start-realtime-transcription handler:", error)
+      logger.error("Error in start-realtime-transcription handler:", error)
       return { success: false, error: error.message }
     }
   })
@@ -246,7 +249,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const result = await appState.processingHelper.processRealTimeAudioChunk(data, mimeType, customPrompt)
       return result
     } catch (error: any) {
-      console.error("Error in process-realtime-audio-chunk handler:", error)
+      logger.error("Error in process-realtime-audio-chunk handler:", error)
       throw error
     }
   })
@@ -256,7 +259,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const filePath = await appState.processingHelper.stopRealTimeTranscription()
       return { success: true, filePath }
     } catch (error: any) {
-      console.error("Error in stop-realtime-transcription handler:", error)
+      logger.error("Error in stop-realtime-transcription handler:", error)
       return { success: false, error: error.message }
     }
   })
@@ -266,7 +269,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const transcript = await appState.processingHelper.getRealTimeTranscript()
       return { success: true, transcript }
     } catch (error: any) {
-      console.error("Error in get-realtime-transcript handler:", error)
+      logger.error("Error in get-realtime-transcript handler:", error)
       return { success: false, error: error.message, transcript: null }
     }
   })
@@ -276,7 +279,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const isActive = appState.processingHelper.isRealTimeTranscriptionActive()
       return { isActive }
     } catch (error: any) {
-      console.error("Error in is-realtime-transcription-active handler:", error)
+      logger.error("Error in is-realtime-transcription-active handler:", error)
       return { isActive: false }
     }
   })
@@ -284,13 +287,72 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Meeting Assistant handlers
   ipcMain.handle("generate-meeting-suggestion", async (event, transcript: string, systemPrompt: string) => {
     try {
-      console.log("[IPC] generate-meeting-suggestion called with transcript length:", transcript.length)
+      logger.info("[IPC] generate-meeting-suggestion called with transcript length:", transcript.length)
+
+      const { metrics: transcriptionMetrics, requestEpochMs } = appState.processingHelper.noteSuggestionRequest()
+      if (transcriptionMetrics) {
+        const sinceElectron = requestEpochMs - transcriptionMetrics.electronReceivedAt
+        const sincePython = transcriptionMetrics.pythonCompletionEpochMs != null
+          ? requestEpochMs - transcriptionMetrics.pythonCompletionEpochMs
+          : null
+        if (metricsLoggingEnabled) {
+          logger.info(
+            `[Metrics][Suggestion] Time since transcription: renderer_request=${sinceElectron}ms python_reference=${sincePython ?? "n/a"}ms (iteration=${transcriptionMetrics.iteration ?? "?"})`
+          )
+        }
+      } else {
+        if (metricsLoggingEnabled) {
+          logger.info("[Metrics][Suggestion] No transcription metrics snapshot available for this suggestion request.")
+        }
+      }
+
       const llmHelper = appState.processingHelper.getLLMHelper()
+      const llmStartEpochMs = Date.now()
       const suggestion = await llmHelper.generateMeetingSuggestion(transcript, systemPrompt)
-      console.log("[IPC] Generated suggestion:", suggestion)
-      return suggestion
+      const llmCompletedEpochMs = Date.now()
+      const llmDurationMs = llmCompletedEpochMs - llmStartEpochMs
+      appState.processingHelper.noteSuggestionResponse(llmDurationMs)
+
+      logger.info("[IPC] Generated suggestion:", suggestion)
+      if (metricsLoggingEnabled) {
+        logger.info(
+          `[Metrics][Suggestion] LLM duration: ${llmDurationMs}ms (round trip ${llmCompletedEpochMs - requestEpochMs}ms)`
+        )
+      }
+
+      const transcriptionTimeline = transcriptionMetrics ? {
+        iteration: transcriptionMetrics.iteration,
+        python_latency_ms: transcriptionMetrics.pythonLatencyMs,
+        python_first_partial_latency_ms: transcriptionMetrics.firstPartialLatencyMs,
+        python_to_electron_ms: transcriptionMetrics.pythonToElectronMs,
+        electron_received_epoch_ms: transcriptionMetrics.electronReceivedAt,
+        electron_emit_timestamp: transcriptionMetrics.electronEmitTimestamp,
+        renderer_request_epoch_ms: requestEpochMs,
+        transcription_to_request_ms: requestEpochMs - transcriptionMetrics.electronReceivedAt,
+        transcription_to_request_python_ms: transcriptionMetrics.pythonCompletionEpochMs != null
+          ? requestEpochMs - transcriptionMetrics.pythonCompletionEpochMs
+          : null,
+        fallback_used: transcriptionMetrics.fallbackUsed,
+        partial_update_count: transcriptionMetrics.partialUpdateCount
+      } : null
+
+      const responseMetrics = {
+        ...(suggestion.metrics ?? {}),
+        llm_duration_ms: suggestion.metrics?.llm_duration_ms ?? llmDurationMs,
+        llm_started_at: suggestion.metrics?.llm_started_at ?? new Date(llmStartEpochMs).toISOString(),
+        llm_completed_at: suggestion.metrics?.llm_completed_at ?? new Date(llmCompletedEpochMs).toISOString(),
+        llm_round_trip_duration_ms: llmCompletedEpochMs - requestEpochMs,
+        renderer_request_epoch_ms: requestEpochMs,
+        renderer_response_epoch_ms: llmCompletedEpochMs,
+        transcription_timeline: transcriptionTimeline
+      }
+
+      return {
+        ...suggestion,
+        metrics: responseMetrics
+      }
     } catch (error: any) {
-      console.error("Error in generate-meeting-suggestion handler:", error)
+      logger.error("Error in generate-meeting-suggestion handler:", error)
       throw error
     }
   })

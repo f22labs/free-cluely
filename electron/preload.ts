@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron"
+import type {
+  RealtimePartialMetrics,
+  RealtimeCompleteMetrics,
+  MeetingSuggestionMetrics
+} from "../src/types/electron"
 
 // Types for the exposed Electron API
 interface ElectronAPI {
@@ -25,8 +30,8 @@ interface ElectronAPI {
 
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
-  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => () => void
-  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => () => void
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => () => void
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
@@ -57,7 +62,7 @@ interface ElectronAPI {
   testLlmConnection: () => Promise<{ success: boolean; error?: string }>
   
   // Meeting Assistant
-  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation" }>
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation"; metrics?: MeetingSuggestionMetrics }>
   
   invoke: (channel: string, ...args: any[]) => Promise<any>
 }
@@ -188,15 +193,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
     }
   },
-  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => {
-    const subscription = (_: any, data: { text: string; fullTranscript: string | null }) => callback(data)
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => callback(data)
     ipcRenderer.on("realtime-transcription-update", subscription)
     return () => {
       ipcRenderer.removeListener("realtime-transcription-update", subscription)
     }
   },
-  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => {
-    const subscription = (_: any, data: { text: string; fullTranscript: string }) => callback(data)
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => callback(data)
     ipcRenderer.on("realtime-transcription-complete", subscription)
     return () => {
       ipcRenderer.removeListener("realtime-transcription-complete", subscription)
