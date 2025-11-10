@@ -8,12 +8,23 @@ Communicates via JSON over stdin/stdout for IPC with Electron.
 import sys
 import json
 import os
+import time
+import threading
 from pathlib import Path
+from datetime import datetime
 
 try:
     from RealtimeSTT import AudioToTextRecorder
 except ImportError:
-    print(json.dumps({"type": "error", "error": "RealtimeSTT not installed. Run: pip install RealtimeSTT"}), file=sys.stderr)
+    _ts = datetime.now().isoformat()
+    print(
+        json.dumps({
+            "type": "error",
+            "error": f"[{_ts}] RealtimeSTT not installed. Run: pip install RealtimeSTT",
+            "timestamp": _ts,
+        }),
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 class RealtimeSTTService:
@@ -25,6 +36,19 @@ class RealtimeSTTService:
         self.last_written_text = ""  # Track last written text to avoid duplicates
         self.last_realtime_update = ""  # Track last real-time update
         self.realtime_buffer = []  # Buffer to store all real-time updates as backup
+        self.current_iteration_start = None
+        self.current_iteration_index = 0
+        self.partial_logged = False
+        self.last_audio_detected = None
+        self.audio_watchdog_stop: threading.Event | None = None
+        self.audio_watchdog_thread: threading.Thread | None = None
+        self.audio_watchdog_last_warning = None
+        self.current_iteration_wallclock_iso = None
+        self.current_iteration_start_epoch_ms = None
+        self.current_iteration_monotonic_ms = None
+        self.first_partial_latency_ms = None
+        self.partial_update_count = 0
+        self.debug_enabled = os.getenv("RTSTT_DEBUG", "").lower() in ("1", "true", "yes")
         
         # Create transcript file if path provided
         if transcript_file_path:
@@ -39,12 +63,14 @@ class RealtimeSTTService:
         
         # Don't create recorder here - will be created in run() with callbacks
         self.recorder = None
-        self._send_message({"type": "status", "status": "initialized"})
+        self._send_message({"type": "status", "status": "initialized", "timestamp": self._get_timestamp()})
     
     def _get_timestamp(self):
-        from datetime import datetime
         return datetime.now().isoformat()
     
+    def _get_epoch_ms(self):
+        return int(time.time() * 1000)
+
     def _send_message(self, message):
         """Send JSON message to stdout"""
         try:
@@ -54,7 +80,29 @@ class RealtimeSTTService:
     
     def _send_error(self, error_msg):
         """Send error message"""
-        print(json.dumps({"type": "error", "error": error_msg}), file=sys.stderr, flush=True)
+        timestamp = self._get_timestamp()
+        error_text = error_msg if isinstance(error_msg, str) else str(error_msg)
+        print(json.dumps({"type": "error", "error": error_text, "timestamp": timestamp}), file=sys.stderr, flush=True)
+
+    def _log(self, level, message):
+        if level == "debug" and not self.debug_enabled:
+            return
+        timestamp = self._get_timestamp()
+        text = message if isinstance(message, str) else str(message)
+        print(
+            json.dumps({"type": "log", "level": level, "message": text, "timestamp": timestamp}),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _debug(self, message):
+        self._log("debug", message)
+
+    def _info(self, message):
+        self._log("info", message)
+
+    def _warn(self, message):
+        self._log("warn", message)
     
     def _append_to_file(self, text, is_realtime=False):
         """Append text to transcript file, avoiding duplicates"""
@@ -92,7 +140,7 @@ class RealtimeSTTService:
                     with open(self.transcript_file_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines)
                 except Exception as e:
-                    self._send_error(f"[DEBUG] Error reading file for duplicate removal: {str(e)}")
+                    self._debug(f"Error reading file for duplicate removal: {str(e)}")
                 
                 # Append the new complete transcription
                 with open(self.transcript_file_path, 'a', encoding='utf-8') as f:
@@ -110,7 +158,7 @@ class RealtimeSTTService:
             return
         
         self.is_recording = True
-        self._send_message({"type": "status", "status": "recording_started"})
+        self._send_message({"type": "status", "status": "recording_started", "timestamp": self._get_timestamp()})
     
     def stop_recording(self):
         """Stop recording and finalize transcript file"""
@@ -143,73 +191,96 @@ class RealtimeSTTService:
         self._send_message({
             "type": "status",
             "status": "recording_stopped",
-            "full_transcript": " ".join(self.full_transcript),
-            "file_path": self.transcript_file_path
+            "full_transcript": "\n".join(self.full_transcript),
+            "file_path": self.transcript_file_path,
+            "timestamp": self._get_timestamp()
         })
     
     def run(self):
         """Main run loop - continuously transcribe audio"""
         # Track all real-time updates to prevent losing any text
         self.realtime_buffer = []
+        self.last_audio_detected = time.monotonic()
         
         def on_realtime_update(text):
             """Callback for real-time transcription updates"""
-            # FIRST LOG - this confirms callback was triggered (audio is being received!)
-            self._send_error(f"[FLOW] ✓✓✓ on_realtime_update CALLBACK TRIGGERED ✓✓✓")
-            # DEBUG: Always log when callback is called (even if empty)
-            self._send_error(f"[DEBUG] on_realtime_update CALLED with text='{text}' (type: {type(text)}, len: {len(text) if text else 0})")
-            
-            if text and text.strip():
-                cleaned = self._preprocess_text(text.strip())
-                self._send_error(f"[DEBUG] After preprocessing: '{cleaned}'")
-                
-                # FILTER: Skip if this looks like an error message being transcribed
-                error_patterns = [
-                    'no clip', 'no clips', 'clip timestamp', 'clip timestamps',
-                    'timestamp found', 'vad filter', 'set vad', 'runtime error',
-                    'exception', 'error:', 'traceback'
-                ]
-                cleaned_lower = cleaned.lower()
-                if any(pattern in cleaned_lower for pattern in error_patterns):
-                    self._send_error(f"[DEBUG] FILTERED: Skipping potential error message transcription: '{cleaned}'")
-                    return  # Don't add error messages to transcription
-                
-                # IMPORTANT: Store ALL real-time updates in buffer to prevent loss
-                if cleaned and cleaned not in self.realtime_buffer:
-                    self.realtime_buffer.append(cleaned)
-                    self._send_error(f"[DEBUG] Added to buffer. Buffer now has {len(self.realtime_buffer)} entries")
-                
-                if cleaned and cleaned != self.last_realtime_update:
-                    # Only update if it's different from last update
-                    self.last_realtime_update = cleaned
-                    # Build full display text: completed sentences + current partial
-                    complete_sentences = " ".join(self.full_transcript)
-                    full_display = (complete_sentences + " " + cleaned).strip() if complete_sentences else cleaned
-                    
-                    # Send real-time update to UI with both partial and full context
-                    self._send_message({
-                        "type": "realtime_update",
-                        "text": cleaned,  # Current partial sentence
-                        "fullTranscript": full_display,  # Complete sentences + current partial
-                        "timestamp": self._get_timestamp()
-                    })
-                    # Track but don't write real-time updates to file
-                    self._append_to_file(cleaned, is_realtime=True)
-                else:
-                    self._send_error(f"[DEBUG] Skipping update - same as last: '{cleaned}'")
-            else:
-                self._send_error(f"[DEBUG] on_realtime_update: text is empty or None - text='{text}'")
+            self._info(f"[Transcription Update] iteration {self.current_iteration_index}: {text}")
+            now_monotonic = time.monotonic()
+            self.last_audio_detected = now_monotonic
+
+            if not text:
+                return
+
+            cleaned = self._preprocess_text(text.strip())
+            if not cleaned:
+                return
+
+            error_patterns = [
+                'no clip', 'no clips', 'clip timestamp', 'clip timestamps',
+                'timestamp found', 'vad filter', 'set vad', 'runtime error',
+                'exception', 'error:', 'traceback'
+            ]
+            cleaned_lower = cleaned.lower()
+            if any(pattern in cleaned_lower for pattern in error_patterns):
+                return
+
+            if cleaned not in self.realtime_buffer:
+                self.realtime_buffer.append(cleaned)
+
+            if cleaned == self.last_realtime_update:
+                return
+
+            self.last_realtime_update = cleaned
+            self.partial_update_count += 1
+
+            latency_ms = None
+            if self.current_iteration_start is not None:
+                latency_ms = round((now_monotonic - self.current_iteration_start) * 1000, 2)
+                if not self.partial_logged:
+                    self.first_partial_latency_ms = latency_ms
+                self.partial_logged = True
+
+            complete_sentences = "\n".join(self.full_transcript)
+            full_display = f"{complete_sentences}\n{cleaned}".strip() if complete_sentences else cleaned
+
+            emit_timestamp_iso = self._get_timestamp()
+            emit_epoch_ms = self._get_epoch_ms()
+
+            self._send_message({
+                "type": "realtime_update",
+                "text": cleaned,
+                "fullTranscript": full_display,
+                "timestamp": emit_timestamp_iso,
+                "metrics": {
+                    "iteration": self.current_iteration_index,
+                    "partial_index": self.partial_update_count,
+                    "latency_ms": latency_ms,
+                    "first_partial_latency_ms": self.first_partial_latency_ms,
+                    "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                    "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                    "python_emit_timestamp": emit_timestamp_iso,
+                    "python_emit_epoch_ms": emit_epoch_ms
+                }
+            })
+            self._append_to_file(cleaned, is_realtime=True)
         
         def on_transcription_complete(text):
             """Callback for completed transcriptions - called by recorder.text()"""
-            # DEBUG: Always log when callback is called
-            self._send_error(f"[DEBUG] on_transcription_complete called with: '{text}' (type: {type(text)})")
+            completion_monotonic = time.monotonic()
+            self.last_audio_detected = completion_monotonic
+            total_latency_ms = None
+            if self.current_iteration_start is not None:
+                total_latency_ms = round((completion_monotonic - self.current_iteration_start) * 1000, 2)
+            if self.debug_enabled and text:
+                self._debug(f"Transcription complete (iteration {self.current_iteration_index}): {text}")
             try:
                 if text and text.strip():
                     cleaned = self._preprocess_text(text.strip())
                     # Remove trailing ellipses
                     if cleaned.endswith("..."):
                         cleaned = cleaned[:-3].strip()
+                    
+                    self._info(f"[Transcription Complete] iteration {self.current_iteration_index}: {cleaned}")
                     
                     # FILTER: Skip if this looks like an error message being transcribed
                     error_patterns = [
@@ -219,19 +290,9 @@ class RealtimeSTTService:
                     ]
                     cleaned_lower = cleaned.lower()
                     if any(pattern in cleaned_lower for pattern in error_patterns):
-                        self._send_error(f"[DEBUG] FILTERED: Skipping error message from transcription_complete: '{cleaned}'")
-                        # Preserve buffer if we have one - don't lose good transcriptions
-                        if self.realtime_buffer:
-                            self._send_error(f"[DEBUG] Preserving real-time buffer with {len(self.realtime_buffer)} entries despite error")
                         return  # Don't add error messages to transcript
                     
                     if cleaned:
-                        # CRITICAL: Intelligent buffer merging to prevent word loss
-                        # Check if any text from real-time buffer was missed
-                        self._send_error(f"[DEBUG] Real-time buffer has {len(self.realtime_buffer)} entries before processing")
-                        
-                        # SMART MERGING: Compare final transcription with buffer to catch missed words
-                        # If buffer has longer/more complete text, use it instead or merge intelligently
                         if self.realtime_buffer:
                             # Get the most complete entry from buffer (usually the last one)
                             buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
@@ -239,22 +300,34 @@ class RealtimeSTTService:
                             # If buffer text is significantly longer or more complete, it might have more words
                             # Use the longer/more detailed version, prioritizing buffer during fast speech
                             if buffer_text and len(buffer_text) > len(cleaned) * 1.2:  # Buffer is 20%+ longer
-                                self._send_error(f"[DEBUG] Buffer text longer ({len(buffer_text)}) than final ({len(cleaned)}), using buffer text")
                                 # Prefer buffer if it's substantially longer (likely more complete for fast speech)
                                 if buffer_text.lower() not in cleaned.lower() and cleaned.lower() not in buffer_text.lower():
                                     # They're different - merge them intelligently
                                     # Use buffer if it contains the final text plus more
                                     if cleaned.lower() in buffer_text.lower():
                                         cleaned = buffer_text  # Use the longer buffer version
-                                        self._send_error(f"[DEBUG] Using buffer text as it contains final text plus more: '{cleaned[:60]}...'")
-                                    # Otherwise keep the final text but log the discrepancy
-                                    else:
-                                        self._send_error(f"[DEBUG] WARNING: Buffer and final text differ significantly. Final: '{cleaned[:40]}...' Buffer: '{buffer_text[:40]}...'")
                         
                         # Check if this is already in the transcript to avoid duplicates
                         if cleaned not in self.full_transcript:
                             self.full_transcript.append(cleaned)
-                            self._send_error(f"[DEBUG] Added to transcript. Total sentences: {len(self.full_transcript)}")
+                            
+                            buffer_entry_count = len(self.realtime_buffer)
+                            completion_iso = self._get_timestamp()
+                            completion_epoch_ms = self._get_epoch_ms()
+                            metrics_payload = {
+                                "iteration": self.current_iteration_index,
+                                "transcription_latency_ms": total_latency_ms,
+                                "first_partial_latency_ms": self.first_partial_latency_ms,
+                                "partial_update_count": self.partial_update_count,
+                                "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                                "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                                "python_completion_timestamp": completion_iso,
+                                "python_completion_epoch_ms": completion_epoch_ms,
+                                "python_emit_timestamp": completion_iso,
+                                "python_emit_epoch_ms": completion_epoch_ms,
+                                "realtime_buffer_entries": buffer_entry_count,
+                                "fallback_used": False
+                            }
                             
                             # Clear real-time buffer AFTER successful transcription and merging
                             self.realtime_buffer.clear()
@@ -264,52 +337,72 @@ class RealtimeSTTService:
                                 "type": "transcription_complete",
                                 "text": cleaned,
                                 "full_transcript": " ".join(self.full_transcript),
-                                "timestamp": self._get_timestamp()
+                                "timestamp": completion_iso,
+                                "metrics": metrics_payload
                             })
                             
                             # Write complete transcription to file (will remove any matching real-time line)
                             self._append_to_file(cleaned, is_realtime=False)
                         else:
-                            self._send_error(f"[DEBUG] Skipping duplicate sentence: '{cleaned}' already in transcript")
-                            # Still clear buffer to avoid accumulation
+                            self._debug(f"Skipping duplicate sentence: '{cleaned}' already in transcript")
                             self.realtime_buffer.clear()
                 else:
-                    self._send_error(f"[DEBUG] on_transcription_complete: text is empty or None")
+                    self._debug("on_transcription_complete received empty text")
                     # CRITICAL: If final transcription is empty but buffer has content, use buffer!
                     # This handles cases where fast speech causes final transcription to fail
                     if self.realtime_buffer:
-                        self._send_error(f"[DEBUG] WARNING: Complete callback empty but buffer has {len(self.realtime_buffer)} entries!")
+                        self._debug(f"Complete callback empty but buffer has {len(self.realtime_buffer)} entries")
                         # Use the most complete buffer entry as fallback
                         buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
                         if buffer_text and buffer_text.strip():
                             cleaned = self._preprocess_text(buffer_text.strip())
                             if cleaned and cleaned not in self.full_transcript:
-                                self._send_error(f"[DEBUG] FALLBACK: Using buffer text '{cleaned[:50]}...' since final transcription was empty")
+                                self._debug(f"Using buffer text '{cleaned[:50]}...' as fallback")
                                 self.full_transcript.append(cleaned)
+                                
+                                buffer_entry_count = len(self.realtime_buffer)
+                                completion_iso = self._get_timestamp()
+                                completion_epoch_ms = self._get_epoch_ms()
+                                metrics_payload = {
+                                    "iteration": self.current_iteration_index,
+                                    "transcription_latency_ms": total_latency_ms,
+                                    "first_partial_latency_ms": self.first_partial_latency_ms,
+                                    "partial_update_count": self.partial_update_count,
+                                    "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                                    "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                                    "python_completion_timestamp": completion_iso,
+                                    "python_completion_epoch_ms": completion_epoch_ms,
+                                    "python_emit_timestamp": completion_iso,
+                                    "python_emit_epoch_ms": completion_epoch_ms,
+                                    "realtime_buffer_entries": buffer_entry_count,
+                                    "fallback_used": True
+                                }
+                                
                                 self._send_message({
                                     "type": "transcription_complete",
                                     "text": cleaned,
                                     "full_transcript": " ".join(self.full_transcript),
-                                    "timestamp": self._get_timestamp()
+                                    "timestamp": completion_iso,
+                                    "metrics": metrics_payload
                                 })
                                 self._append_to_file(cleaned, is_realtime=False)
                             self.realtime_buffer.clear()
             except Exception as callback_error:
                 # Don't let callback errors break the loop
-                self._send_error(f"[DEBUG] Error in on_transcription_complete callback: {callback_error}")
+                self._debug(f"Error in on_transcription_complete callback: {callback_error}")
                 import traceback
-                self._send_error(f"[DEBUG] Callback traceback: {traceback.format_exc()}")
+                self._debug(f"Callback traceback: {traceback.format_exc()}")
         
         # Platform detection and M1-specific diagnostics
         import platform
         system_info = platform.system()
         machine = platform.machine()
-        self._send_error(f"[PLATFORM] System: {system_info}, Architecture: {machine}")
+        self._info(f"[PLATFORM] System: {system_info}, Architecture: {machine}")
         
         # Check for Apple Silicon (M1/M2/M3/M4)
         is_apple_silicon = machine == 'arm64' and system_info == 'Darwin'
         if is_apple_silicon:
-            self._send_error(f"[PLATFORM] ⚠️  Detected Apple Silicon (M1/M2/M3/M4) - checking compatibility...")
+            self._info("[PLATFORM] Detected Apple Silicon (M1/M2/M3/M4) - checking compatibility...")
             
             # Test microphone access before creating recorder
             try:
@@ -317,9 +410,7 @@ class RealtimeSTTService:
                 p_test = pyaudio.PyAudio()
                 try:
                     default_input = p_test.get_default_input_device_info()
-                    self._send_error(f"[PLATFORM] ✓ Microphone detected: {default_input['name']}")
-                    self._send_error(f"[PLATFORM] ✓ Microphone index: {default_input['index']}")
-                    self._send_error(f"[PLATFORM] ✓ Sample rate: {default_input['defaultSampleRate']} Hz")
+                    self._info(f"[PLATFORM] Microphone detected: {default_input['name']} (index={default_input['index']}, sample_rate={default_input['defaultSampleRate']} Hz)")
                     
                     # Try to open a test stream
                     test_stream = p_test.open(
@@ -329,22 +420,18 @@ class RealtimeSTTService:
                         input=True,
                         frames_per_buffer=1024
                     )
-                    self._send_error(f"[PLATFORM] ✓✓✓ Microphone stream test PASSED on Apple Silicon ✓✓✓")
+                    self._info("[PLATFORM] Microphone stream test passed on Apple Silicon")
                     test_stream.stop_stream()
                     test_stream.close()
                 except Exception as mic_error:
-                    self._send_error(f"[PLATFORM] ✗✗✗ Microphone access test FAILED on Apple Silicon ✗✗✗")
-                    self._send_error(f"[PLATFORM] Error: {mic_error}")
-                    self._send_error(f"[PLATFORM] Possible causes:")
-                    self._send_error(f"[PLATFORM]   1. Microphone permissions not granted")
-                    self._send_error(f"[PLATFORM]   2. PyAudio/PortAudio compatibility issue")
-                    self._send_error(f"[PLATFORM]   3. Try: brew install portaudio && pip install --force-reinstall pyaudio")
+                    self._warn(f"[PLATFORM] Microphone access test failed on Apple Silicon: {mic_error}")
+                    self._warn("[PLATFORM] Possible causes: permissions not granted, PyAudio mismatch, or PortAudio issue")
                 finally:
                     p_test.terminate()
             except ImportError:
-                self._send_error(f"[PLATFORM] ⚠️  PyAudio not available for microphone test")
+                self._debug("[PLATFORM] PyAudio not available for microphone test")
             except Exception as e:
-                self._send_error(f"[PLATFORM] ⚠️  Error testing microphone: {e}")
+                self._warn(f"[PLATFORM] Error testing microphone: {e}")
         
         # Create recorder with callbacks
         try:
@@ -369,15 +456,6 @@ class RealtimeSTTService:
                 'early_transcription_on_silence': 1.8,  # 1.8s - faster finalization, prevents waiting too long (good for fast speech)
                 # Additional VAD settings for better detection
                 'silero_use_onnx': True,  # Use ONNX for faster VAD processing
-                # Enhanced initial prompt optimized for fast speech and accuracy
-                'initial_prompt_realtime': (
-                    "This is real-time speech transcription requiring word-for-word accuracy. "
-                    "Transcribe every single word spoken, including fast speech and rapid-fire sentences. "
-                    "Do not skip, omit, or abbreviate any words, even when speech is very fast. "
-                    "Capture speech that starts after long pauses or silence periods. "
-                    "Maintain accuracy even during rapid continuous speech without breaks. "
-                    "Prioritize completeness over speed - capture everything that is spoken."
-                ),
                 # Optimized beam size for better accuracy during fast and continuous speech
                 'beam_size': 10,  # Higher beam size for final transcription = better accuracy
                 'beam_size_realtime': 7,  # Higher real-time beam = better accuracy for fast speech (7-8 is optimal balance)
@@ -392,54 +470,46 @@ class RealtimeSTTService:
                 'download_root': None,  # Use default cache location
             }
             
-            self._send_message({"type": "status", "status": "initializing_recorder"})
-            self._send_error("[DEBUG] Creating AudioToTextRecorder with config...")
-            self._send_error(f"[DEBUG] Config: model={self.model}, realtime_model={self.realtime_model}, language={self.language}")
+            self._send_message({"type": "status", "status": "initializing_recorder", "timestamp": self._get_timestamp()})
+            self._debug("Creating AudioToTextRecorder with config")
+            self._debug(f"Config: model={self.model}, realtime_model={self.realtime_model}, language={self.language}")
             
             try:
-                self._send_error(f"[DEBUG] Creating recorder with VAD: silero={recorder_config['silero_sensitivity']}, webrtc={recorder_config['webrtc_sensitivity']}")
+                self._debug(f"Creating recorder with VAD: silero={recorder_config['silero_sensitivity']}, webrtc={recorder_config['webrtc_sensitivity']}")
                 
                 if is_apple_silicon:
-                    self._send_error(f"[PLATFORM] Creating AudioToTextRecorder on Apple Silicon...")
-                    self._send_error(f"[PLATFORM] This may take longer on M1/M2/M3 due to model loading...")
+                    self._debug("Creating AudioToTextRecorder on Apple Silicon (first load may take longer)")
                 
                 self.recorder = AudioToTextRecorder(**recorder_config)
-                self._send_error("[DEBUG] AudioToTextRecorder created successfully")
-                self._send_error("[DEBUG] Recorder is ready to listen for audio")
+                self._debug("AudioToTextRecorder created successfully and ready to listen")
                 
-                # Additional M1-specific verification
                 if is_apple_silicon:
-                    self._send_error(f"[PLATFORM] ✓ Recorder created on Apple Silicon")
-                    # Try to verify audio access is working
                     try:
                         import pyaudio
                         p_verify = pyaudio.PyAudio()
-                        # Get the device that will be used
                         default_input = p_verify.get_default_input_device_info()
-                        self._send_error(f"[PLATFORM] ✓ Will use microphone: {default_input['name']} (index: {default_input['index']})")
+                        self._info(f"[PLATFORM] Recorder active on microphone: {default_input['name']} (index={default_input['index']})")
                         p_verify.terminate()
                     except Exception as verify_error:
-                        self._send_error(f"[PLATFORM] ⚠️  Could not verify microphone: {verify_error}")
+                        self._warn(f"[PLATFORM] Could not verify microphone after recorder creation: {verify_error}")
                 
             except Exception as init_error:
-                self._send_error(f"[DEBUG] ERROR creating recorder: {init_error}")
+                self._send_error(f"Error creating recorder: {init_error}")
                 if is_apple_silicon:
-                    self._send_error(f"[PLATFORM] ✗✗✗ Recorder creation failed on Apple Silicon ✗✗✗")
-                    self._send_error(f"[PLATFORM] Common fixes for M1/M2/M3:")
-                    self._send_error(f"[PLATFORM]   1. Install PortAudio: brew install portaudio")
-                    self._send_error(f"[PLATFORM]   2. Reinstall PyAudio: pip install --force-reinstall pyaudio")
-                    self._send_error(f"[PLATFORM]   3. Check microphone permissions in System Settings")
-                    self._send_error(f"[PLATFORM]   4. Try running from Terminal (not IDE) to get permission prompt")
+                    self._warn("Recorder creation failed on Apple Silicon")
+                    self._info("[PLATFORM] Common fixes for M1/M2/M3:")
+                    self._info("  1. Install PortAudio: brew install portaudio")
+                    self._info("  2. Reinstall PyAudio: pip install --force-reinstall pyaudio")
+                    self._info("  3. Check microphone permissions in System Settings")
+                    self._info("  4. Try running from Terminal (not IDE) to get permission prompt")
                 import traceback
-                self._send_error(f"[DEBUG] Init traceback: {traceback.format_exc()}")
+                self._debug(f"Init traceback: {traceback.format_exc()}")
                 raise
             
             self.start_recording()
-            self._send_message({"type": "status", "status": "ready"})
-            self._send_error("[FLOW] ✓ Status: ready sent")
-            self._send_error("[FLOW] Recorder started. Starting transcription loop...")
-            self._send_error("[DEBUG] Recorder started. Starting transcription loop. Listening for audio...")
-            self._send_error("[DEBUG] Speak now - callbacks should fire when speech is detected!")
+            self._send_message({"type": "status", "status": "ready", "timestamp": self._get_timestamp()})
+            self._debug("Recorder started; transcription loop active")
+            self._debug("Callbacks will fire when speech is detected")
             
             # Listen continuously
             import threading
@@ -450,9 +520,10 @@ class RealtimeSTTService:
             def stdin_listener():
                 try:
                     while True:
-                        self._send_error("[DEBUG] Listening...")
+                        self._debug("Waiting for commands on stdin")
                         line = sys.stdin.readline()
-                        self._send_error(f"[DEBUG] line: {line}")
+                        if self.debug_enabled:
+                            self._debug(f"stdin line: {line.rstrip()}")
                         if not line:
                             break
                         try:
@@ -467,7 +538,30 @@ class RealtimeSTTService:
             
             stdin_thread = threading.Thread(target=stdin_listener, daemon=True)
             stdin_thread.start()
-            self._send_error("[FLOW] ✓ stdin listener thread started")
+            self._debug("stdin listener thread started")
+            
+            self.audio_watchdog_stop = threading.Event()
+            self.audio_watchdog_last_warning = None
+
+            def audio_watchdog():
+                self._debug("Audio watchdog thread started")
+                while not self.audio_watchdog_stop.is_set():
+                    time.sleep(3)
+                    if not self.is_recording:
+                        continue
+                    if self.last_audio_detected is None:
+                        continue
+                    gap = time.monotonic() - self.last_audio_detected
+                    if gap > 5:
+                        if (
+                            self.audio_watchdog_last_warning is None
+                            or (time.monotonic() - self.audio_watchdog_last_warning) > 5
+                        ):
+                            self.audio_watchdog_last_warning = time.monotonic()
+                            self._info(f"[AUDIO WATCHDOG] No audio detected for {gap:.2f} seconds. Waiting for speech input...")
+
+            self.audio_watchdog_thread = threading.Thread(target=audio_watchdog, daemon=True)
+            self.audio_watchdog_thread.start()
             
             # Main transcription loop - recorder.text() requires a callback
             # This matches the pattern from realtime_stt.py: while True: recorder.text(callback)
@@ -475,17 +569,16 @@ class RealtimeSTTService:
             consecutive_errors = 0
             max_consecutive_errors = 5
             
-            self._send_error("[FLOW] ===== Starting main transcription loop ======")
+            self._debug("Starting main transcription loop")
             while True:
                 iteration += 1
-                self._send_error(f"[FLOW] ===== ENTERING LOOP ITERATION {iteration} =====")
-                self._send_error(f"[DEBUG] ===== Loop iteration {iteration} ===== (errors: {consecutive_errors})")
+                self._debug(f"Entering loop iteration {iteration} (consecutive errors: {consecutive_errors})")
                 
                 try:
                     # Check for stop command (non-blocking)
                     try:
                         stop_queue.get_nowait()
-                        self._send_error(f"[DEBUG] Stop command received at iteration {iteration}")
+                        self._debug(f"Stop command received at iteration {iteration}")
                         self.stop_recording()
                         break
                     except queue.Empty:
@@ -493,98 +586,114 @@ class RealtimeSTTService:
                     
                     # Validate recorder before using
                     if self.recorder is None:
-                        self._send_error("[FLOW] ✗ ERROR: Recorder is None! Cannot continue.")
-                        self._send_error("[DEBUG] ERROR: Recorder is None! Cannot continue.")
+                        self._send_error("Recorder is None. Stopping transcription loop.")
                         break
                     
-                    self._send_error(f"[FLOW] ✓ Recorder validated (not None)")
-                    
+                    # Reset iteration tracking
+                    now_monotonic = time.monotonic()
+                    self.current_iteration_index = iteration
+                    self.current_iteration_start = now_monotonic
+                    self.current_iteration_monotonic_ms = now_monotonic * 1000
+                    self.current_iteration_wallclock_iso = self._get_timestamp()
+                    self.current_iteration_start_epoch_ms = self._get_epoch_ms()
+                    self.first_partial_latency_ms = None
+                    self.partial_update_count = 0
+                    self.partial_logged = False
+                    if self.last_audio_detected is None:
+                        self.last_audio_detected = now_monotonic
+
                     # Get transcription - pass callback function (blocks until speech is detected)
                     # This matches the pattern: recorder.text(callback)
-                    self._send_error(f"[FLOW] About to call recorder.text() - iteration {iteration}")
-                    self._send_error(f"[FLOW] ⏳ recorder.text() will now BLOCK and wait for speech detection...")
-                    self._send_error(f"[DEBUG] About to call recorder.text() - iteration {iteration}")
-                    self._send_error(f"[DEBUG] WAITING for speech... (this blocks until VAD detects speech)")
-                    self._send_error(f"[DEBUG] VAD Settings: silero={recorder_config.get('silero_sensitivity')}, webrtc={recorder_config.get('webrtc_sensitivity')}")
+                    self._debug(f"Starting recorder.text() for iteration {iteration}")
+                    self._debug(f"VAD Settings: silero={recorder_config.get('silero_sensitivity')}, webrtc={recorder_config.get('webrtc_sensitivity')}")
                     
                     # recorder.text() blocks until speech is detected and processed
                     # It will call:
                     #   - on_realtime_transcription_update (continuously as you speak)
                     #   - on_transcription_complete (when sentence ends)
                     # It should return the transcribed text or None
-                    self._send_error(f"[DEBUG] Calling recorder.text() - iteration {iteration}")
+                    self._debug(f"Calling recorder.text() - iteration {iteration}")
                     
                     if is_apple_silicon:
-                        self._send_error(f"[PLATFORM] ⚠️  On Apple Silicon: recorder.text() may block silently if microphone not accessible")
-                        self._send_error(f"[PLATFORM] ⚠️  If no callbacks fire, check:")
-                        self._send_error(f"[PLATFORM]      - Microphone permissions granted?")
-                        self._send_error(f"[PLATFORM]      - Is microphone actually receiving audio?")
-                        self._send_error(f"[PLATFORM]      - Try running: python3 mic_testing.py to test microphone")
-                        self._send_error(f"[PLATFORM] ⚠️  If stuck after 30s, it's likely a microphone access issue")
-                    
+                        self._debug("Recorder running on Apple Silicon; monitor callbacks for microphone access issues")
+                    start_block = time.monotonic()
                     # Call recorder.text() - this blocks until speech is detected
                     result = self.recorder.text(on_transcription_complete)
+                    block_duration = time.monotonic() - start_block
+                    self._info(
+                        f"[BLOCK] recorder.text() iteration {iteration} "
+                        f"duration={block_duration:.2f}s "
+                        f"partial_logged={self.partial_logged}"
+                    )
                     
-                    self._send_error(f"[FLOW] ✓ recorder.text() RETURNED after blocking")
-                    self._send_error(f"[FLOW] recorder.text() completed - result received")
+                    self._debug(f"recorder.text() completed for iteration {iteration}")
+                    
+                    if (result is None or result == "") and not self.partial_logged:
+                        self._warn(f"[AUDIO] recorder.text() returned empty without partial updates (iteration {self.current_iteration_index})")
+                    
+                    self.current_iteration_start = None
+                    self.current_iteration_wallclock_iso = None
+                    self.current_iteration_start_epoch_ms = None
+                    self.current_iteration_monotonic_ms = None
+                    self.first_partial_latency_ms = None
+                    self.partial_update_count = 0
+                    self.partial_logged = False
                     
                     # Reset error counter on success
                     consecutive_errors = 0
-                    self._send_error(f"[DEBUG] recorder.text() returned: result={result} (type: {type(result)})")
-                    self._send_error(f"[DEBUG] Completed iteration {iteration} successfully, continuing to next iteration...")
+                    self._debug(f"Iteration {iteration} completed successfully (result type: {type(result)})")
                     
                     # If no result but callback fired, that's OK - continue
                     if result is None or result == "":
-                        self._send_error(f"[DEBUG] Note: recorder.text() returned empty, but callback should have processed it. Continuing...")
+                        self._debug("recorder.text() returned empty, callback already handled transcription")
                     
                 except KeyboardInterrupt:
-                    self._send_error("[DEBUG] KeyboardInterrupt received")
+                    self._debug("KeyboardInterrupt received")
                     break
                 except EOFError:
-                    self._send_error("[DEBUG] EOFError received")
+                    self._debug("EOFError received")
                     break
                 except Exception as e:
                     consecutive_errors += 1
                     error_msg = str(e)
-                    self._send_error(f"[DEBUG] Exception at iteration {iteration} (error #{consecutive_errors}): {error_msg}")
+                    self._debug(f"Exception at iteration {iteration} (error #{consecutive_errors}): {error_msg}")
                     import traceback
-                    self._send_error(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                    self._debug(f"Traceback: {traceback.format_exc()}")
                     
                     # CRITICAL: Preserve real-time buffer when errors occur
                     # Don't lose transcriptions we've already captured
                     if self.realtime_buffer:
-                        self._send_error(f"[DEBUG] ERROR OCCURRED: Preserving real-time buffer with {len(self.realtime_buffer)} entries")
+                        self._debug(f"Preserving real-time buffer with {len(self.realtime_buffer)} entries")
                         # Try to save what we have from the buffer before continuing
                         # The buffer contains valid transcriptions that shouldn't be lost
                         if len(self.realtime_buffer) > 0:
                             # Use the most complete entry from buffer as fallback
                             last_buffer_entry = self.realtime_buffer[-1]
                             if last_buffer_entry and last_buffer_entry not in self.full_transcript:
-                                self._send_error(f"[DEBUG] Attempting to save buffer entry as fallback: '{last_buffer_entry[:50]}...'")
+                                self._debug(f"Attempting to save buffer entry as fallback: '{last_buffer_entry[:50]}...'")
                                 # Don't add automatically - let next successful transcription handle it
                     
                     # Check if recorder is still valid
                     if self.recorder is None:
-                        self._send_error("[DEBUG] Recorder became None after error. Cannot continue.")
+                        self._debug("Recorder became None after error. Cannot continue.")
                         break
                     
                     # Too many consecutive errors - something is seriously wrong
                     if consecutive_errors >= max_consecutive_errors:
-                        self._send_error(f"[DEBUG] Too many consecutive errors ({consecutive_errors}). Stopping.")
+                        self._debug(f"Too many consecutive errors ({consecutive_errors}). Stopping.")
                         # Before stopping, try to save any remaining buffer content
                         if self.realtime_buffer:
-                            self._send_error(f"[DEBUG] Final attempt: Saving {len(self.realtime_buffer)} buffer entries before exit")
+                            self._debug(f"Final attempt: Saving {len(self.realtime_buffer)} buffer entries before exit")
                         break
                     
                     # Try to continue - wait before retrying
-                    import time
                     wait_time = min(1.0 * consecutive_errors, 5.0)  # Exponential backoff, max 5 seconds
-                    self._send_error(f"[DEBUG] Waiting {wait_time:.1f} seconds before retrying...")
+                    self._debug(f"Waiting {wait_time:.1f} seconds before retrying...")
                     time.sleep(wait_time)
                     # Continue loop - don't exit
                     
         except KeyboardInterrupt:
-            self._send_message({"type": "status", "status": "stopped"})
+            self._send_message({"type": "status", "status": "stopped", "timestamp": self._get_timestamp()})
         except Exception as e:
             self._send_error(f"Fatal error: {str(e)}")
             import traceback
@@ -652,9 +761,11 @@ def main():
                 service.run()
             
     except KeyboardInterrupt:
-        print(json.dumps({"type": "status", "status": "interrupted"}), file=sys.stderr)
+        _ts = datetime.now().isoformat()
+        print(json.dumps({"type": "status", "status": "interrupted", "timestamp": _ts}), file=sys.stderr)
     except Exception as e:
-        print(json.dumps({"type": "error", "error": str(e)}), file=sys.stderr)
+        _ts = datetime.now().isoformat()
+        print(json.dumps({"type": "error", "error": f"[{_ts}] {e}", "timestamp": _ts}), file=sys.stderr)
         sys.exit(1)
 
 

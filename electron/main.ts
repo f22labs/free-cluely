@@ -4,6 +4,7 @@ import { WindowHelper } from "./WindowHelper"
 import { ScreenshotHelper } from "./ScreenshotHelper"
 import { ShortcutsHelper } from "./shortcuts"
 import { ProcessingHelper } from "./ProcessingHelper"
+import { logger } from "./logger"
 
 export class AppState {
   private static instance: AppState | null = null
@@ -118,10 +119,10 @@ export class AppState {
   }
 
   public toggleMainWindow(): void {
-    console.log(
-      "Screenshots: ",
+    logger.info(
+      "Screenshots:",
       this.screenshotHelper.getScreenshotQueue().length,
-      "Extra screenshots: ",
+      "Extra screenshots:",
       this.screenshotHelper.getExtraScreenshotQueue().length
     )
     this.windowHelper.toggleMainWindow()
@@ -192,7 +193,7 @@ export class AppState {
       // Create a minimal icon - just use an empty image and set the title
       trayImage = nativeImage.createFromBuffer(Buffer.alloc(0))
     } catch (error) {
-      console.log("Using empty tray image")
+      logger.info("Using empty tray image")
       trayImage = nativeImage.createEmpty()
     }
     
@@ -228,7 +229,7 @@ export class AppState {
               })
             }
           } catch (error) {
-            console.error("Error taking screenshot from tray:", error)
+                  logger.error("Error taking screenshot from tray:", error)
           }
         }
       },
@@ -275,7 +276,7 @@ async function initializeApp() {
   initializeIpcHandlers(appState)
 
   app.whenReady().then(() => {
-    console.log("App is ready")
+    logger.info("App is ready")
     appState.createWindow()
     appState.createTray()
     // Register global shortcuts using ShortcutsHelper
@@ -283,7 +284,7 @@ async function initializeApp() {
   })
 
   app.on("activate", () => {
-    console.log("App activated")
+    logger.info("App activated")
     if (appState.getMainWindow() === null) {
       appState.createWindow()
     }
@@ -301,4 +302,4 @@ async function initializeApp() {
 }
 
 // Start the application
-initializeApp().catch(console.error)
+initializeApp().catch((error) => logger.error("Failed to initialize app:", error))

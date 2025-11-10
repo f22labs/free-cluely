@@ -7,6 +7,11 @@ import {
   ToastMessage
 } from "../components/ui/toast"
 import ModelSelector from "../components/ui/ModelSelector"
+import type {
+  MeetingSuggestionMetrics,
+  RealtimeCompleteMetrics,
+  RealtimePartialMetrics
+} from "../types/electron"
 
 interface MeetingAssistantProps {
   setView: React.Dispatch<React.SetStateAction<"queue" | "solutions" | "debug" | "meeting">>
@@ -45,6 +50,19 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const lastSuggestionTimeRef = useRef<number>(0)
   const lastSuggestionTextRef = useRef<string>("")
   const rateLimitBackoffRef = useRef<number>(2000) // Adaptive delay, starts at 2 seconds
+  const lastTranscriptionMetaRef = useRef<{
+    iteration: number | null
+    pythonLatencyMs: number | null
+    electronReceivedAt: number
+    eventReceivedAt: number
+    eventReceivedPerf: number
+    pythonCompletionEpochMs: number | null
+    metrics?: RealtimeCompleteMetrics
+  } | null>(null)
+  const llmRequestMetaRef = useRef<{ startPerf: number; startEpochMs: number } | null>(null)
+  const pendingSuggestionDisplayRef = useRef<{ startPerf: number; startEpochMs: number } | null>(null)
+  const lastSuggestionMetricsRef = useRef<MeetingSuggestionMetrics | undefined>(undefined)
+  const previousSuggestionCountRef = useRef<number>(0)
 
   // Component mount logging
   useEffect(() => {
@@ -64,6 +82,15 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
     }
     loadCurrentModel()
   }, [])
+
+  useEffect(() => {
+    if (pendingSuggestionDisplayRef.current && suggestions.length > previousSuggestionCountRef.current) {
+      const renderDelta = performance.now() - pendingSuggestionDisplayRef.current.startPerf
+      console.log(`[MeetingAssistant][Metrics] Suggestion rendered in ${renderDelta.toFixed(2)}ms (total suggestions=${suggestions.length})`)
+      pendingSuggestionDisplayRef.current = null
+    }
+    previousSuggestionCountRef.current = suggestions.length
+  }, [suggestions])
 
   // Helper function to calculate text similarity (0-1, where 1 is identical)
   const calculateSimilarity = (text1: string, text2: string): number => {
@@ -149,6 +176,28 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       return
     }
 
+    const requestEpochMs = Date.now()
+    const requestPerfMs = performance.now()
+    const transcriptionMeta = lastTranscriptionMetaRef.current
+    if (transcriptionMeta) {
+      const timeSinceEventMs = requestPerfMs - transcriptionMeta.eventReceivedPerf
+      const timeSinceElectronMs = requestEpochMs - transcriptionMeta.electronReceivedAt
+      const timeSincePythonMs = transcriptionMeta.pythonCompletionEpochMs != null
+        ? requestEpochMs - transcriptionMeta.pythonCompletionEpochMs
+        : null
+      console.log("[MeetingAssistant][Metrics] Preparing suggestion request:", {
+        iteration: transcriptionMeta.iteration,
+        pythonLatencyMs: transcriptionMeta.pythonLatencyMs,
+        timeSinceRendererEventMs: Number.isFinite(timeSinceEventMs) ? timeSinceEventMs.toFixed(2) : null,
+        timeSinceElectronMs,
+        timeSincePythonCompleteMs: timeSincePythonMs
+      })
+    } else {
+      console.log("[MeetingAssistant][Metrics] No transcription metadata available for suggestion request.")
+    }
+    llmRequestMetaRef.current = { startPerf: requestPerfMs, startEpochMs: requestEpochMs }
+    lastSuggestionMetricsRef.current = undefined
+
     console.log("[MeetingAssistant] Starting suggestion generation...")
     setIsGenerating(true)
     try {
@@ -156,8 +205,26 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
         currentTranscript,
         systemPrompt
       )
+
+      const responseEpochMs = Date.now()
+      const responsePerfMs = performance.now()
+      const requestMeta = llmRequestMetaRef.current
+      const rendererRoundTripPerfMs = requestMeta ? responsePerfMs - requestMeta.startPerf : 0
+      const rendererRoundTripEpochMs = requestMeta ? responseEpochMs - requestMeta.startEpochMs : 0
+      console.log("[MeetingAssistant][Metrics] Suggestion response timing:", {
+        rendererRoundTripPerfMs: rendererRoundTripPerfMs.toFixed(2),
+        rendererRoundTripEpochMs,
+        iteration: transcriptionMeta?.iteration ?? lastTranscriptionMetaRef.current?.iteration ?? null
+      })
+      llmRequestMetaRef.current = null
       
       console.log("[MeetingAssistant] Received suggestion:", suggestion)
+      if (suggestion?.metrics) {
+        lastSuggestionMetricsRef.current = suggestion.metrics
+        console.log("[MeetingAssistant][Metrics] LLM metrics payload:", suggestion.metrics)
+      } else {
+        lastSuggestionMetricsRef.current = undefined
+      }
       
       // Reset timer and gradually reduce backoff delay on success
       lastSuggestionTimeRef.current = Date.now()
@@ -186,6 +253,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
         }
         
         // Also check against all existing suggestions before creating the new one
+        let appended = false
         setSuggestions(prev => {
           // Check if this suggestion is too similar to any existing suggestion
           const isDuplicate = prev.some(existing => {
@@ -205,6 +273,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
             timestamp: Date.now(),
             type: suggestion.type || "response"
           }
+          appended = true
           
           // Update refs
           lastSuggestionTextRef.current = suggestionText
@@ -219,8 +288,16 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
           // Only add if it's different from the last one
           return [...prev, newSuggestion]
         })
+        if (appended) {
+          pendingSuggestionDisplayRef.current = {
+            startPerf: performance.now(),
+            startEpochMs: Date.now()
+          }
+          console.log("[MeetingAssistant][Metrics] Queued suggestion display timing measurement")
+        }
       }
     } catch (error: any) {
+      llmRequestMetaRef.current = null
       console.error("Error generating suggestion:", error)
       
       // Handle rate limit errors with user-friendly message
@@ -250,6 +327,9 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       }
     } finally {
       setIsGenerating(false)
+      if (lastSuggestionMetricsRef.current) {
+        console.log("[MeetingAssistant][Metrics] Latest suggestion metrics summary:", lastSuggestionMetricsRef.current)
+      }
     }
   }, [systemPrompt, isGenerating])
 
@@ -257,7 +337,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   useEffect(() => {
     console.log("[MeetingAssistant] Setting up transcription listeners")
     
-    const unsubscribeUpdate = window.electronAPI.onRealtimeTranscriptionUpdate?.((data: any) => {
+    const unsubscribeUpdate = window.electronAPI.onRealtimeTranscriptionUpdate?.((data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => {
       console.log("[MeetingAssistant] Received realtime update:", data)
       if (data && (data.fullTranscript || data.text)) {
         const fullText = data.fullTranscript || data.text || ""
@@ -265,16 +345,66 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
         setTranscript(fullText)
         console.log("[MeetingAssistant] Updated transcript:", fullText.substring(0, 50) + "...")
         // DO NOT generate suggestions on real-time updates - only on complete sentences
+        if (data.metrics) {
+          const elapsedSinceEmit = data.metrics.electron_emit_epoch_ms
+            ? Date.now() - data.metrics.electron_emit_epoch_ms
+            : null
+          console.log("[MeetingAssistant][Metrics][Partial]", {
+            iteration: data.metrics.iteration ?? null,
+            partialIndex: data.metrics.partial_index ?? null,
+            latencyMs: data.metrics.latency_ms ?? null,
+            firstPartialLatencyMs: data.metrics.first_partial_latency_ms ?? null,
+            electronEmitTimestamp: data.metrics.electron_emit_timestamp ?? null,
+            rendererLatencyMs: elapsedSinceEmit
+          })
+        }
       }
     })
 
-    const unsubscribeComplete = window.electronAPI.onRealtimeTranscriptionComplete?.((data: any) => {
+    const unsubscribeComplete = window.electronAPI.onRealtimeTranscriptionComplete?.((data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => {
       console.log("[MeetingAssistant] Received transcription complete:", data)
       if (data && (data.fullTranscript || data.text)) {
         const fullText = data.fullTranscript || data.text || ""
         transcriptRef.current = fullText
         setTranscript(fullText)
         console.log("[MeetingAssistant] Updated transcript (complete):", fullText.substring(0, 50) + "...")
+        const nowEpoch = Date.now()
+        const nowPerf = performance.now()
+
+        if (data.metrics) {
+          const rendererLag = data.metrics.electron_received_epoch_ms != null
+            ? nowEpoch - data.metrics.electron_received_epoch_ms
+            : 0
+          const pythonToRenderer = data.metrics.python_to_electron_ms ?? null
+          console.log("[MeetingAssistant][Metrics][Complete]", {
+            iteration: data.metrics.iteration ?? null,
+            pythonLatencyMs: data.metrics.transcription_latency_ms ?? null,
+            pythonToRendererMs: pythonToRenderer,
+            rendererLagMs: rendererLag,
+            fallbackUsed: data.metrics.fallback_used ?? false,
+            partialUpdates: data.metrics.partial_update_count ?? null
+          })
+          lastTranscriptionMetaRef.current = {
+            iteration: data.metrics.iteration ?? null,
+            pythonLatencyMs: data.metrics.transcription_latency_ms ?? null,
+            electronReceivedAt: data.metrics.electron_received_epoch_ms ?? nowEpoch,
+            eventReceivedAt: nowEpoch,
+            eventReceivedPerf: nowPerf,
+            pythonCompletionEpochMs: data.metrics.python_completion_epoch_ms ?? null,
+            metrics: data.metrics
+          }
+        } else {
+          console.log("[MeetingAssistant][Metrics][Complete] No metrics payload received for this event.")
+          lastTranscriptionMetaRef.current = {
+            iteration: null,
+            pythonLatencyMs: null,
+            electronReceivedAt: nowEpoch,
+            eventReceivedAt: nowEpoch,
+            eventReceivedPerf: nowPerf,
+            pythonCompletionEpochMs: null,
+            metrics: undefined
+          }
+        }
         
         // Only generate suggestion if:
         // 1. There's meaningful new content
