@@ -10,7 +10,8 @@ import ModelSelector from "../components/ui/ModelSelector"
 import type {
   MeetingSuggestionMetrics,
   RealtimeCompleteMetrics,
-  RealtimePartialMetrics
+  RealtimePartialMetrics,
+  RealtimeTimeoutMetrics
 } from "../types/electron"
 
 interface MeetingAssistantProps {
@@ -63,6 +64,10 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const pendingSuggestionDisplayRef = useRef<{ startPerf: number; startEpochMs: number } | null>(null)
   const lastSuggestionMetricsRef = useRef<MeetingSuggestionMetrics | undefined>(undefined)
   const previousSuggestionCountRef = useRef<number>(0)
+  const partialTimeoutStateRef = useRef<Map<number, number>>(new Map())
+const suggestionsContainerRef = useRef<HTMLDivElement>(null)
+const [showNewSuggestionIndicator, setShowNewSuggestionIndicator] = useState(false)
+const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "ready">("idle")
 
   // Component mount logging
   useEffect(() => {
@@ -164,6 +169,22 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
     return true
   }
 
+  const handleSuggestionsScroll = useCallback(() => {
+    const container = suggestionsContainerRef.current
+    if (!container) return
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 10
+    if (atBottom) {
+      setShowNewSuggestionIndicator(false)
+    }
+  }, [])
+
+  const handleRevealNewSuggestion = useCallback(() => {
+    const container = suggestionsContainerRef.current
+    if (!container) return
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" })
+    setShowNewSuggestionIndicator(false)
+  }, [])
+
   const generateSuggestion = useCallback(async (currentTranscript: string) => {
     console.log("[MeetingAssistant] generateSuggestion called:", {
       hasSystemPrompt: !!systemPrompt.trim(),
@@ -236,7 +257,11 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       
       if (suggestion && suggestion.text) {
         const suggestionText = suggestion.text.trim()
-        
+        const container = suggestionsContainerRef.current
+        const wasAtBottom = container
+          ? container.scrollHeight - container.scrollTop - container.clientHeight <= 10
+          : true
+
         // Check similarity with last suggestion - this is the primary filter
         if (lastSuggestionTextRef.current) {
           const similarity = calculateSimilarity(suggestionText, lastSuggestionTextRef.current)
@@ -279,19 +304,18 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
           lastSuggestionTextRef.current = suggestionText
           lastSuggestionTimeRef.current = Date.now()
           lastProcessedTranscriptRef.current = currentTranscript
-          
-          // Scroll to bottom when new suggestion is added
-          setTimeout(() => {
-            suggestionsEndRef.current?.scrollIntoView({ behavior: "smooth" })
-          }, 100)
-          
-          // Only add if it's different from the last one
+
           return [...prev, newSuggestion]
         })
         if (appended) {
           pendingSuggestionDisplayRef.current = {
             startPerf: performance.now(),
             startEpochMs: Date.now()
+          }
+          if (wasAtBottom) {
+            setShowNewSuggestionIndicator(false)
+          } else {
+            setShowNewSuggestionIndicator(true)
           }
           console.log("[MeetingAssistant][Metrics] Queued suggestion display timing measurement")
         }
@@ -332,6 +356,22 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       }
     }
   }, [systemPrompt, isGenerating])
+
+  useEffect(() => {
+    const container = suggestionsContainerRef.current
+    if (!container) return
+    handleSuggestionsScroll()
+    container.addEventListener("scroll", handleSuggestionsScroll)
+    return () => {
+      container.removeEventListener("scroll", handleSuggestionsScroll)
+    }
+  }, [handleSuggestionsScroll, suggestions.length])
+
+  useEffect(() => {
+    if (suggestions.length === 0) {
+      setShowNewSuggestionIndicator(false)
+    }
+  }, [suggestions.length])
 
   // Listen to real-time transcription updates (only for display, not for suggestions)
   useEffect(() => {
@@ -438,6 +478,10 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
           }
         }
         
+        if (data.metrics?.iteration != null) {
+          partialTimeoutStateRef.current.delete(data.metrics.iteration)
+        }
+
         if (
           hasNew &&
           timeSinceLastSuggestion >= MIN_TIME_BETWEEN_SUGGESTIONS &&
@@ -455,9 +499,102 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       }
     })
 
+    const unsubscribeTimeout = window.electronAPI.onRealtimeTranscriptionTimeout?.((data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => {
+      console.log("[MeetingAssistant] Received transcription timeout payload:", data)
+      if (!data) {
+        return
+      }
+
+      const iteration = data.metrics?.iteration ?? null
+      const timeoutSequence = data.metrics?.timeoutSequence ?? null
+      if (iteration !== null && timeoutSequence !== null) {
+        const lastSequence = partialTimeoutStateRef.current.get(iteration) ?? 0
+        if (timeoutSequence <= lastSequence) {
+          console.log("[MeetingAssistant] Timeout sequence not newer; skipping", { iteration, timeoutSequence, lastSequence })
+          return
+        }
+        partialTimeoutStateRef.current.set(iteration, timeoutSequence)
+      } else if (iteration !== null) {
+        // Fallback when sequence missing: treat as single trigger
+        if (partialTimeoutStateRef.current.has(iteration)) {
+          console.log("[MeetingAssistant] Timeout already handled for iteration (no sequence)", iteration)
+          return
+        }
+        partialTimeoutStateRef.current.set(iteration, 1)
+      }
+
+      const fullText = data.fullTranscript || data.text || ""
+      if (!fullText.trim()) {
+        console.log("[MeetingAssistant] Timeout payload missing transcript text, skipping")
+        return
+      }
+
+      transcriptRef.current = fullText
+      setTranscript(fullText)
+
+      const nowEpoch = Date.now()
+      const timeSinceLastSuggestion = nowEpoch - lastSuggestionTimeRef.current
+      const minDelay = rateLimitBackoffRef.current
+      const canGenerate =
+        !!systemPrompt.trim() &&
+        !isGenerating &&
+        (lastSuggestionTimeRef.current === 0 || timeSinceLastSuggestion >= minDelay)
+
+      if (canGenerate) {
+        lastTranscriptionMetaRef.current = {
+          iteration,
+          pythonLatencyMs: null,
+          electronReceivedAt: nowEpoch,
+          eventReceivedAt: nowEpoch,
+          eventReceivedPerf: performance.now(),
+          pythonCompletionEpochMs: null,
+          metrics: undefined
+        }
+        console.log("[MeetingAssistant] Triggering suggestion from timeout fallback", {
+          iteration,
+          timeSinceLastSuggestion,
+          minDelay
+        })
+        generateSuggestion(fullText)
+      } else {
+        const reasons: string[] = []
+        if (!systemPrompt.trim()) reasons.push("missing system prompt")
+        if (isGenerating) reasons.push("already generating")
+        if (lastSuggestionTimeRef.current !== 0 && timeSinceLastSuggestion < minDelay) {
+          reasons.push(`cooldown (${timeSinceLastSuggestion}ms < ${minDelay}ms)`)
+        }
+        console.log("[MeetingAssistant] Skipping timeout-triggered suggestion:", reasons.join(", "))
+      }
+    })
+
+    const unsubscribeStatus = window.electronAPI.onRealtimeTranscriptionStatus?.((data: { status: string; timestamp: number }) => {
+      if (!data || !data.status) return
+      const status = data.status.toLowerCase()
+      if (status === "ready") {
+        setRecorderStatus(prev => {
+          if (prev !== "ready") {
+            setToastMessage({
+              title: "Recorder Ready",
+              description: "You can start speaking now.",
+              variant: "success"
+            })
+            setToastOpen(true)
+          }
+          return "ready"
+        })
+      } else if (status === "recording_started" || status === "initializing" || status === "initializing_recorder") {
+        setRecorderStatus(prev => (prev === "ready" ? prev : "initializing"))
+      } else if (status === "recording_stopped" || status === "stopped") {
+        setRecorderStatus("idle")
+        setShowNewSuggestionIndicator(false)
+      }
+    })
+
     return () => {
       if (unsubscribeUpdate) unsubscribeUpdate()
       if (unsubscribeComplete) unsubscribeComplete()
+      if (unsubscribeTimeout) unsubscribeTimeout()
+      if (unsubscribeStatus) unsubscribeStatus()
       if (suggestionTimeoutRef.current) {
         clearTimeout(suggestionTimeoutRef.current)
       }
@@ -474,6 +611,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       const result = await window.electronAPI.startRealTimeTranscription()
       if (result.success) {
         setIsRecording(true)
+        setRecorderStatus("initializing")
         setTranscript("")
         setSuggestions([])
         transcriptRef.current = ""
@@ -482,7 +620,9 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
         lastSuggestionTimeRef.current = 0
         lastSuggestionTextRef.current = ""
         rateLimitBackoffRef.current = 2000 // Reset to default 2 seconds
-        showToast("Recording Started", "Meeting assistant is now active", "success")
+        partialTimeoutStateRef.current = new Map()
+        setShowNewSuggestionIndicator(false)
+        showToast("Preparing Recorder", "Hold on while we get everything ready...", "neutral")
       } else {
         showToast("Error", result.error || "Failed to start transcription", "error")
       }
@@ -496,6 +636,8 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
       const result = await window.electronAPI.stopRealTimeTranscription()
       if (result.success) {
         setIsRecording(false)
+        setRecorderStatus("idle")
+        setShowNewSuggestionIndicator(false)
         showToast("Recording Stopped", "Transcription saved", "success")
       }
     } catch (error: any) {
@@ -546,7 +688,8 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
         backdropFilter: 'blur(20px)',
         WebkitBackdropFilter: 'blur(20px)',
         position: 'relative',
-        zIndex: 10
+        zIndex: 10,
+        WebkitAppRegion: 'no-drag'
       }}
     >
       <div className="w-full h-full">
@@ -562,14 +705,24 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
           </Toast>
 
           {/* Header with Close Button */}
-          <div className="flex items-center justify-between mb-4 pb-3 border-b border-gray-600/70 bg-gray-800/30 px-2 py-2 rounded-md">
+          <div
+            className="flex items-center justify-between mb-4 pb-3 border-b border-gray-600/70 bg-gray-800/30 px-2 py-2 rounded-md"
+            style={{ WebkitAppRegion: 'drag' }}
+          >
             <h2 className="text-xl font-bold text-white drop-shadow-lg">🤝 Meeting Assistant</h2>
-            <div className="flex gap-2 items-center">
+            <div className="flex gap-2 items-center" style={{ WebkitAppRegion: 'no-drag' }}>
               <button
                 className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
                 onClick={() => setIsSettingsOpen(!isSettingsOpen)}
               >
                 ⚙️ Models
+              </button>
+              <button
+                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
+                onClick={() => window.electronAPI.minimizeWindow?.()}
+                aria-label="Minimize"
+              >
+                &minus;
               </button>
               <button
                 className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
@@ -632,6 +785,21 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
               )}
             </button>
           </div>
+          {isRecording && (
+            <div className="mb-4">
+              {recorderStatus === "ready" ? (
+                <span className="inline-flex items-center gap-2 text-sm text-green-300 bg-green-900/40 px-3 py-1.5 rounded-lg">
+                  <span className="animate-pulse">🎙️</span>
+                  Recorder ready — start speaking.
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-2 text-sm text-yellow-200 bg-yellow-900/40 px-3 py-1.5 rounded-lg">
+                  <span className="inline-flex h-2 w-2 rounded-full bg-yellow-200 animate-ping" />
+                  Preparing recorder… please wait.
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Transcript Display - Always visible */}
           <div className="mb-4">
@@ -641,8 +809,10 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
             <div className="w-full px-4 py-3 rounded-lg bg-gray-800/90 text-gray-100 text-sm border border-gray-600/70 shadow-lg max-h-48 overflow-y-auto backdrop-blur-sm min-h-[100px]">
               {transcript || (
                 <span className="text-gray-400 italic">
-                  {isRecording 
-                    ? "Listening... Transcription will appear here as you speak." 
+                  {isRecording
+                    ? recorderStatus === "ready"
+                      ? "Listening... Transcription will appear here as you speak."
+                      : "Preparing recorder... please wait for the ready signal before speaking."
                     : "Start the meeting to see live transcription here."}
                 </span>
               )}
@@ -659,41 +829,55 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
                 <span className="text-xs text-gray-300 animate-pulse bg-blue-500/20 px-2 py-1 rounded">Generating...</span>
               )}
             </div>
-            <div className="w-full rounded-lg bg-gray-800/90 border border-gray-600/70 shadow-lg max-h-64 overflow-y-auto backdrop-blur-sm">
-              {suggestions.length === 0 ? (
-                <div className="w-full px-4 py-6 text-gray-300 text-sm text-center bg-gray-700/20">
-                  {isRecording
-                    ? "AI suggestions will appear here as the conversation progresses..."
-                    : "Start the meeting to receive AI suggestions"}
-                </div>
-              ) : (
-                <div className="p-3 space-y-3">
-                  {suggestions.map((suggestion, idx) => (
-                    <div
-                      key={idx}
-                      className={`px-4 py-3 rounded-lg backdrop-blur-sm ${
-                        idx === suggestions.length - 1
-                          ? "bg-blue-600/40 border-2 border-blue-400/60 shadow-lg"
-                          : "bg-gray-700/60 border border-gray-600/40"
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <span className="text-lg mt-0.5 flex-shrink-0 drop-shadow">
-                          {suggestion.type === "negotiation" ? "💼" : 
-                           suggestion.type === "question" ? "❓" : "💡"}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs text-gray-300 mb-1.5 uppercase tracking-wide font-semibold">
-                            {suggestion.type === "negotiation" ? "Negotiation" : 
-                             suggestion.type === "question" ? "Question" : "Response"}
-                          </p>
-                          <p className="text-sm text-white leading-relaxed drop-shadow-sm">{suggestion.text}</p>
+            <div className="relative">
+              <div
+                ref={suggestionsContainerRef}
+                className="w-full rounded-lg bg-gray-800/90 border border-gray-600/70 shadow-lg max-h-64 overflow-y-auto backdrop-blur-sm"
+              >
+                {suggestions.length === 0 ? (
+                  <div className="w-full px-4 py-6 text-gray-300 text-sm text-center bg-gray-700/20">
+                    {isRecording
+                      ? "AI suggestions will appear here as the conversation progresses..."
+                      : "Start the meeting to receive AI suggestions"}
+                  </div>
+                ) : (
+                  <div className="p-3 space-y-3">
+                    {suggestions.map((suggestion, idx) => (
+                      <div
+                        key={idx}
+                        className={`px-4 py-3 rounded-lg backdrop-blur-sm ${
+                          idx === suggestions.length - 1
+                            ? "bg-blue-600/40 border-2 border-blue-400/60 shadow-lg"
+                            : "bg-gray-700/60 border border-gray-600/40"
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <span className="text-lg mt-0.5 flex-shrink-0 drop-shadow">
+                            {suggestion.type === "negotiation" ? "💼" : 
+                             suggestion.type === "question" ? "❓" : "💡"}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-gray-300 mb-1.5 uppercase tracking-wide font-semibold">
+                              {suggestion.type === "negotiation" ? "Negotiation" : 
+                               suggestion.type === "question" ? "Question" : "Response"}
+                            </p>
+                            <p className="text-sm text-white leading-relaxed drop-shadow-sm">{suggestion.text}</p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
-                  <div ref={suggestionsEndRef} />
-                </div>
+                    ))}
+                    <div ref={suggestionsEndRef} />
+                  </div>
+                )}
+              </div>
+              {showNewSuggestionIndicator && (
+                <button
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-blue-500/90 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-full shadow-lg border border-blue-200/40 transition"
+                  onClick={handleRevealNewSuggestion}
+                  type="button"
+                >
+                  New suggestion — tap to view ↓
+                </button>
               )}
             </div>
           </div>

@@ -586,9 +586,53 @@ export class ProcessingHelper {
           });
         }
         break;
+
+      case "transcription_timeout":
+        if (message.text && this.realTimeTranscriptSession) {
+          const metrics = message.metrics ?? {}
+          const iteration = typeof metrics.iteration === "number" ? metrics.iteration : null
+          const timeoutElapsed = typeof metrics.timeout_elapsed_ms === "number"
+            ? metrics.timeout_elapsed_ms
+            : (typeof metrics.timeoutElapsedMs === "number" ? metrics.timeoutElapsedMs : null)
+          const timeoutSeconds = typeof metrics.timeout_seconds === "number"
+            ? metrics.timeout_seconds
+            : (typeof metrics.timeoutSeconds === "number" ? metrics.timeoutSeconds : null)
+          const timeoutSequence = typeof metrics.timeout_sequence === "number"
+            ? metrics.timeout_sequence
+            : (typeof metrics.timeoutSequence === "number" ? metrics.timeoutSequence : null)
+
+          if (metricsLoggingEnabled) {
+            logger.warn(
+              `[RealtimeSTT][Timeout] iteration ${iteration ?? "?"} elapsed=${timeoutElapsed ?? "n/a"}ms sequence=${timeoutSequence ?? "?"}`
+            )
+          }
+
+          const nowEpoch = Date.now()
+          const timeoutPayload = {
+            text: message.text,
+            fullTranscript: message.full_transcript || message.text,
+            metrics: {
+              iteration,
+              timeoutElapsedMs: timeoutElapsed,
+              timeoutSeconds,
+              timeoutSequence,
+              pythonIterationStartedAt: metrics.python_iteration_started_at ?? null,
+              pythonIterationStartedEpochMs: metrics.python_iteration_started_epoch_ms ?? null,
+              electron_emit_timestamp: new Date(nowEpoch).toISOString(),
+              electron_emit_epoch_ms: nowEpoch
+            }
+          }
+
+          mainWindow.webContents.send("realtime-transcription-timeout", timeoutPayload)
+        }
+        break;
         
       case "status":
         logger.info("[RealtimeSTT] Status:", message.status);
+        mainWindow.webContents.send("realtime-transcription-status", {
+          status: message.status ?? "",
+          timestamp: Date.now()
+        });
         break;
         
       case "error":

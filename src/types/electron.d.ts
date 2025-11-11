@@ -21,6 +21,12 @@ export interface RealtimeCompleteMetrics extends RealtimePartialMetrics {
   fallback_used?: boolean
 }
 
+export interface RealtimeTimeoutMetrics extends RealtimePartialMetrics {
+  timeoutElapsedMs?: number | null
+  timeoutSeconds?: number | null
+  timeoutSequence?: number | null
+}
+
 export interface MeetingSuggestionTimelineMetrics {
   iteration: number | null
   python_latency_ms: number | null
@@ -69,11 +75,14 @@ export interface ElectronAPI {
   onDebugError: (callback: (error: string) => void) => () => void
   onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => () => void
   onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => () => void
+  onRealtimeTranscriptionTimeout: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => void) => () => void
+  onRealtimeTranscriptionStatus: (callback: (data: { status: string; timestamp: number }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
+  minimizeWindow: () => Promise<void>
   analyzeAudioFromBase64: (data: string, mimeType: string) => Promise<{ text: string; timestamp: number }>
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   quitApp: () => Promise<void>

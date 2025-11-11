@@ -214,6 +214,15 @@ export class WindowHelper {
     this.isWindowVisible = true
   }
 
+  public minimizeMainWindow(): void {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      logger.warn("Main window does not exist or is destroyed.")
+      return
+    }
+    this.mainWindow.minimize()
+    this.isWindowVisible = false
+  }
+
   public toggleMainWindow(): void {
     if (this.isWindowVisible) {
       this.hideMainWindow()
