@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron"
 import type {
   RealtimePartialMetrics,
   RealtimeCompleteMetrics,
+  RealtimeTimeoutMetrics,
   MeetingSuggestionMetrics
 } from "../src/types/electron"
 
@@ -32,11 +33,14 @@ interface ElectronAPI {
   onDebugError: (callback: (error: string) => void) => () => void
   onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => () => void
   onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => () => void
+  onRealtimeTranscriptionTimeout: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => void) => () => void
+  onRealtimeTranscriptionStatus: (callback: (data: { status: string; timestamp: number }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
+  minimizeWindow: () => Promise<void>
   analyzeAudioFromBase64: (data: string, mimeType: string) => Promise<{ text: string; timestamp: number }>
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   analyzeImageFile: (path: string) => Promise<void>
@@ -207,10 +211,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("realtime-transcription-complete", subscription)
     }
   },
+  onRealtimeTranscriptionTimeout: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => callback(data)
+    ipcRenderer.on("realtime-transcription-timeout", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-timeout", subscription)
+    }
+  },
+  onRealtimeTranscriptionStatus: (callback: (data: { status: string; timestamp: number }) => void) => {
+    const subscription = (_: any, data: { status: string; timestamp: number }) => callback(data)
+    ipcRenderer.on("realtime-transcription-status", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-status", subscription)
+    }
+  },
   moveWindowLeft: () => ipcRenderer.invoke("move-window-left"),
   moveWindowRight: () => ipcRenderer.invoke("move-window-right"),
   moveWindowUp: () => ipcRenderer.invoke("move-window-up"),
   moveWindowDown: () => ipcRenderer.invoke("move-window-down"),
+  minimizeWindow: () => ipcRenderer.invoke("minimize-window"),
   analyzeAudioFromBase64: (data: string, mimeType: string) => ipcRenderer.invoke("analyze-audio-base64", data, mimeType),
   analyzeAudioFile: (path: string) => ipcRenderer.invoke("analyze-audio-file", path),
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),

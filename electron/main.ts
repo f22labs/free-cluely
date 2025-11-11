@@ -179,6 +179,10 @@ export class AppState {
     this.windowHelper.moveWindowUp()
   }
 
+  public minimizeMainWindow(): void {
+    this.windowHelper.minimizeMainWindow()
+  }
+
   public centerAndShowWindow(): void {
     this.windowHelper.centerAndShowWindow()
   }

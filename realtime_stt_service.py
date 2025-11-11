@@ -12,6 +12,7 @@ import time
 import threading
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 try:
     from RealtimeSTT import AudioToTextRecorder
@@ -49,6 +50,17 @@ class RealtimeSTTService:
         self.first_partial_latency_ms = None
         self.partial_update_count = 0
         self.debug_enabled = os.getenv("RTSTT_DEBUG", "").lower() in ("1", "true", "yes")
+
+        # Suggestion timeout management
+        self.suggestion_timeout_seconds = float(os.getenv("RTSTT_SUGGESTION_TIMEOUT_SECONDS", "3.0"))
+        self._suggestion_timer: threading.Timer | None = None
+        self._suggestion_timer_iteration: int | None = None
+        self._suggestion_timer_triggered = False
+        self._suggestion_timer_payload: dict[str, Any] | None = None
+        self._suggestion_timer_start_monotonic: float | None = None
+        self._suggestion_timer_start_epoch_ms: int | None = None
+        self._suggestion_timer_lock = threading.Lock()
+        self._suggestion_timeout_counts: dict[int, int] = {}
         
         # Create transcript file if path provided
         if transcript_file_path:
@@ -104,6 +116,117 @@ class RealtimeSTTService:
     def _warn(self, message):
         self._log("warn", message)
     
+    def _cancel_suggestion_timeout(self, iteration: int | None = None):
+        """Cancel any pending suggestion timeout for the current iteration."""
+        with self._suggestion_timer_lock:
+            if iteration is not None and self._suggestion_timer_iteration != iteration:
+                return
+            if self._suggestion_timer:
+                self._suggestion_timer.cancel()
+            self._suggestion_timer = None
+            self._suggestion_timer_iteration = None
+            self._suggestion_timer_triggered = False
+            self._suggestion_timer_payload = None
+            self._suggestion_timer_start_monotonic = None
+            self._suggestion_timer_start_epoch_ms = None
+            if iteration is not None:
+                self._suggestion_timeout_counts.pop(iteration, None)
+
+    def _schedule_suggestion_timeout(self, partial_text: str, full_transcript: str):
+        """
+        Schedule a fallback suggestion trigger if the final transcription
+        does not arrive within the configured timeout window.
+        """
+        if not partial_text or self.suggestion_timeout_seconds <= 0:
+            return
+
+        iteration = self.current_iteration_index
+        if iteration is None:
+            return
+
+        now_monotonic = time.monotonic()
+        now_epoch_ms = self._get_epoch_ms()
+
+        with self._suggestion_timer_lock:
+            # Always keep the latest partial transcript in payload
+            payload_metrics = {
+                "iteration": iteration,
+                "partial_index": self.partial_update_count,
+                "first_partial_latency_ms": self.first_partial_latency_ms,
+                "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+            }
+            self._suggestion_timer_payload = {
+                "text": partial_text,
+                "full_transcript": full_transcript,
+                "metrics": payload_metrics,
+            }
+
+            if self._suggestion_timer is None or self._suggestion_timer_iteration != iteration:
+                # Cancel any pending timer for a previous iteration
+                if self._suggestion_timer and self._suggestion_timer_iteration != iteration:
+                    self._suggestion_timer.cancel()
+
+                self._suggestion_timer_iteration = iteration
+                self._suggestion_timer_triggered = False
+                self._suggestion_timer_start_monotonic = self.current_iteration_start or now_monotonic
+                self._suggestion_timer_start_epoch_ms = self.current_iteration_start_epoch_ms or now_epoch_ms
+
+                self._suggestion_timer = threading.Timer(
+                    self.suggestion_timeout_seconds,
+                    self._emit_suggestion_timeout
+                )
+                self._suggestion_timer.daemon = True
+                self._suggestion_timer.start()
+
+    def _emit_suggestion_timeout(self):
+        """Emit a partial transcription event when the final transcript is delayed."""
+        with self._suggestion_timer_lock:
+            if self._suggestion_timer_triggered or not self._suggestion_timer_payload:
+                return
+
+            payload = dict(self._suggestion_timer_payload)
+            iteration = self._suggestion_timer_iteration
+            start_monotonic = self._suggestion_timer_start_monotonic
+            start_epoch_ms = self._suggestion_timer_start_epoch_ms
+
+            self._suggestion_timer_triggered = True
+            self._suggestion_timer = None
+
+        if iteration is None:
+            return
+
+        elapsed_ms = None
+        if start_monotonic is not None:
+            elapsed_ms = max(0.0, (time.monotonic() - start_monotonic) * 1000.0)
+        else:
+            elapsed_ms = self.suggestion_timeout_seconds * 1000.0
+
+        with self._suggestion_timer_lock:
+            timeout_sequence = self._suggestion_timeout_counts.get(iteration, 0) + 1
+            self._suggestion_timeout_counts[iteration] = timeout_sequence
+
+        metrics = payload.get("metrics", {}) or {}
+        metrics.update({
+            "iteration": iteration,
+            "timeout_elapsed_ms": elapsed_ms,
+            "timeout_seconds": self.suggestion_timeout_seconds,
+            "timeout_sequence": timeout_sequence,
+            "python_iteration_started_at": metrics.get("python_iteration_started_at"),
+            "python_iteration_started_epoch_ms": metrics.get("python_iteration_started_epoch_ms"),
+            "partial_update_count": self.partial_update_count,
+        })
+
+        message = {
+            "type": "transcription_timeout",
+            "text": payload.get("text", ""),
+            "full_transcript": payload.get("full_transcript", payload.get("text", "")),
+            "timestamp": self._get_timestamp(),
+            "metrics": metrics,
+        }
+
+        self._send_message(message)
+
     def _append_to_file(self, text, is_realtime=False):
         """Append text to transcript file, avoiding duplicates"""
         if self.transcript_file_path and text:
@@ -263,6 +386,9 @@ class RealtimeSTTService:
                 }
             })
             self._append_to_file(cleaned, is_realtime=True)
+
+            # Start a suggestion timeout if we have not received a final transcription yet.
+            self._schedule_suggestion_timeout(cleaned, full_display)
         
         def on_transcription_complete(text):
             """Callback for completed transcriptions - called by recorder.text()"""
@@ -271,6 +397,8 @@ class RealtimeSTTService:
             total_latency_ms = None
             if self.current_iteration_start is not None:
                 total_latency_ms = round((completion_monotonic - self.current_iteration_start) * 1000, 2)
+            # Final transcription arrived, cancel any pending timeout for this iteration
+            self._cancel_suggestion_timeout(self.current_iteration_index)
             if self.debug_enabled and text:
                 self._debug(f"Transcription complete (iteration {self.current_iteration_index}): {text}")
             try:
@@ -462,7 +590,7 @@ class RealtimeSTTService:
                 # Note: compression_ratio_threshold, log_prob_threshold, and no_speech_threshold are not 
                 # direct AudioToTextRecorder parameters - they're lower-level Whisper parameters
                 # that are handled internally by the model configuration
-                'no_log_file': True,
+                'no_log_file': False,
                 'faster_whisper_vad_filter': True,  # Enable VAD filtering to prevent "No clip timestamps" error
                 # Try to ensure microphone access
                 'use_microphone': True,  # Explicitly enable microphone
@@ -627,6 +755,9 @@ class RealtimeSTTService:
                     )
                     
                     self._debug(f"recorder.text() completed for iteration {iteration}")
+
+                    # Ensure suggestion timeout is cleared once recorder.text completes.
+                    self._cancel_suggestion_timeout(iteration)
                     
                     if (result is None or result == "") and not self.partial_logged:
                         self._warn(f"[AUDIO] recorder.text() returned empty without partial updates (iteration {self.current_iteration_index})")
