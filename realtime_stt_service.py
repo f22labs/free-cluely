@@ -32,6 +32,8 @@ class RealtimeSTTService:
     def __init__(self, transcript_file_path=None, model='large-v3', realtime_model='base.en', language='en'):
         """Initialize the RealtimeSTT recorder"""
         self.transcript_file_path = transcript_file_path
+        self.transcript_file_header = None
+        self.session_start_iso = self._get_timestamp()
         self.full_transcript = []
         self.is_recording = False
         self.last_written_text = ""  # Track last written text to avoid duplicates
@@ -65,8 +67,10 @@ class RealtimeSTTService:
         # Create transcript file if path provided
         if transcript_file_path:
             os.makedirs(os.path.dirname(transcript_file_path), exist_ok=True)
+            header = f"=== Real-Time Transcript Started at {self.session_start_iso} ===\n\n"
             with open(transcript_file_path, 'w', encoding='utf-8') as f:
-                f.write(f"=== Real-Time Transcript Started at {self._get_timestamp()} ===\n\n")
+                f.write(header)
+            self.transcript_file_header = header
         
         # Store config for later use in run()
         self.model = model
@@ -274,6 +278,30 @@ class RealtimeSTTService:
                 self.last_realtime_update = ""  # Reset after writing complete
             except Exception as e:
                 self._send_error(f"Error writing to file: {str(e)}")
+
+    def _write_full_transcript_to_file(self, include_footer=False):
+        """Write the entire accumulated transcript to disk."""
+        if not self.transcript_file_path:
+            return
+
+        try:
+            os.makedirs(os.path.dirname(self.transcript_file_path), exist_ok=True)
+
+            lines = []
+            header = self.transcript_file_header or f"=== Real-Time Transcript Started at {self.session_start_iso} ===\n\n"
+            lines.append(header if header.endswith("\n") else header + "\n")
+
+            for entry in [t.strip() for t in self.full_transcript if t.strip()]:
+                lines.append(entry + "\n")
+
+            if include_footer:
+                lines.append("\n")
+                lines.append(f"=== Real-Time Transcript Ended at {self._get_timestamp()} ===\n")
+
+            with open(self.transcript_file_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+        except Exception as e:
+            self._debug(f"Error writing full transcript to file: {e}")
     
     def start_recording(self):
         """Start recording and transcription"""
@@ -304,10 +332,7 @@ class RealtimeSTTService:
         # Finalize transcript file
         if self.transcript_file_path:
             try:
-                full_text = " ".join(self.full_transcript)
-                with open(self.transcript_file_path, 'a', encoding='utf-8') as f:
-                    f.write(f"\n\n=== Real-Time Transcript Ended at {self._get_timestamp()} ===\n")
-                    f.flush()
+                self._write_full_transcript_to_file(include_footer=True)
             except Exception as e:
                 self._send_error(f"Error finalizing file: {str(e)}")
         
@@ -469,8 +494,8 @@ class RealtimeSTTService:
                                 "metrics": metrics_payload
                             })
                             
-                            # Write complete transcription to file (will remove any matching real-time line)
-                            self._append_to_file(cleaned, is_realtime=False)
+                            # Persist full transcript to disk
+                            self._write_full_transcript_to_file()
                         else:
                             self._debug(f"Skipping duplicate sentence: '{cleaned}' already in transcript")
                             self.realtime_buffer.clear()
@@ -513,7 +538,7 @@ class RealtimeSTTService:
                                     "timestamp": completion_iso,
                                     "metrics": metrics_payload
                                 })
-                                self._append_to_file(cleaned, is_realtime=False)
+                                self._write_full_transcript_to_file()
                             self.realtime_buffer.clear()
             except Exception as callback_error:
                 # Don't let callback errors break the loop
