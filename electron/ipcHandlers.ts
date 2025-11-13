@@ -360,4 +360,33 @@ export function initializeIpcHandlers(appState: AppState): void {
       throw error
     }
   })
+  // Logging handler for renderer process
+  // Logging handler for renderer process
+ipcMain.handle("renderer-log", async (event, level: "info" | "warn" | "error" | "debug", ...args: any[]) => {
+  try {
+    const message = args.map(arg => 
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+    ).join(' ')
+    
+    switch (level) {
+      case "info":
+        logger.info("[Renderer]", message)
+        break
+      case "warn":
+        logger.warn("[Renderer]", message)
+        break
+      case "error":
+        logger.error("[Renderer]", message)
+        break
+      case "debug":
+      default:
+        logger.debug("[Renderer]", message)
+        break
+    }
+    return { success: true }
+  } catch (error: any) {
+    logger.error("[IPC] Error in renderer-log handler:", error)
+    return { success: false, error: error.message }
+  }
+})
 }
