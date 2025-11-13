@@ -98,6 +98,7 @@ export interface ElectronAPI {
   isRealTimeTranscriptionActive: () => Promise<{ isActive: boolean }>
   generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation"; metrics?: MeetingSuggestionMetrics }>
   invoke: (channel: string, ...args: any[]) => Promise<any>
+  logToTerminal: (level: "info" | "warn" | "error" | "debug", ...args: any[]) => Promise<void>
 }
 
 declare global {

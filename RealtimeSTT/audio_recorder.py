@@ -717,6 +717,9 @@ class AudioToTextRecorder:
         self.transcribe_count = 0
         self.print_transcription_time = print_transcription_time
         self.early_transcription_on_silence = early_transcription_on_silence
+        self.transcription_queue = queue.Queue() 
+        self.is_transcribing = False
+        self.transcription_thread = None
         self.use_extended_logging = use_extended_logging
         self.faster_whisper_vad_filter = faster_whisper_vad_filter
         self.normalize_audio = normalize_audio
@@ -1978,6 +1981,14 @@ class AudioToTextRecorder:
                                 )
                 self.transcript_process.terminate()
 
+            # Around line 1983, in the shutdown() method, add:
+            logger.debug('Finishing transcription thread')
+            if self.transcription_thread and self.transcription_thread.is_alive():
+                # Wait a bit for current transcription to finish
+                self.transcription_thread.join(timeout=5)
+                if self.transcription_thread.is_alive():
+                    logger.warning("Transcription thread did not terminate in time")
+
             self.parent_transcription_pipe.close()
 
             logger.debug('Finishing realtime thread')
@@ -2347,24 +2358,59 @@ class AudioToTextRecorder:
                                 logger.debug('Debug: Appending data to frames and stopping recording')
                             logger.info("Appending data to frames")
                             self.frames.append(data)
-                            logger.info("Calling stop()")
-                            self.stop()
-                            if not self.is_recording:
-                                if self.speech_end_silence_start != 0:
-                                    self.speech_end_silence_start = 0
-                                    if self.on_turn_detection_stop:
-                                        if self.use_extended_logging:
-                                            logger.debug('Debug: Calling on_turn_detection_stop')
-                                        self._run_callback(self.on_turn_detection_stop)
-
-                                if self.use_extended_logging:
-                                    logger.debug('Debug: Handling non-wake word scenario')
+                            # logger.info("Calling stop()")
+                            # self.stop()
+                            # Instead of stopping, queue this segment for async transcription
+                            if self.frames:  # Only if we have frames to transcribe
+                                logger.info(f"Queueing segment with {len(self.frames)} frames for async transcription")
+                                
+                                # Copy current frames as a segment to transcribe
+                                segment_frames = copy.deepcopy(self.frames)
+                                self.transcription_queue.put(segment_frames)
+                                
+                                # Clear frames but KEEP recording (don't call stop())
+                                self.frames = []  # Start fresh segment
+                                # Keep self.is_recording = True (don't change it!)
+                                
+                                # Start transcription processor if not already running
+                                if not self.is_transcribing and (self.transcription_thread is None or not self.transcription_thread.is_alive()):
+                                    self.transcription_thread = threading.Thread(
+                                        target=self._process_transcription_queue,
+                                        daemon=True,
+                                        name="TranscriptionProcessor"
+                                    )
+                                    self.transcription_thread.start()
+                                    logger.info("Started async transcription processor thread")
+                                
+                                # Reset silence tracking for next segment
+                                self.speech_end_silence_start = 0
+                                self.awaiting_speech_end = False
+                                
+                                if self.on_turn_detection_stop:
+                                    if self.use_extended_logging:
+                                        logger.debug('Debug: Calling on_turn_detection_stop')
+                                    self._run_callback(self.on_turn_detection_stop)
                             else:
-                                if self.use_extended_logging:
-                                    logger.debug('Debug: Setting failed_stop_attempt to True')
-                                failed_stop_attempt = True
+                                # If no frames, just reset silence tracking
+                                self.speech_end_silence_start = 0
+                                self.awaiting_speech_end = False
 
-                            self.awaiting_speech_end = False
+                            # if not self.is_recording:
+                            #     if self.speech_end_silence_start != 0:
+                            #         self.speech_end_silence_start = 0
+                            #         if self.on_turn_detection_stop:
+                            #             if self.use_extended_logging:
+                            #                 logger.debug('Debug: Calling on_turn_detection_stop')
+                            #             self._run_callback(self.on_turn_detection_stop)
+
+                            #     if self.use_extended_logging:
+                            #         logger.debug('Debug: Handling non-wake word scenario')
+                            # else:
+                            #     if self.use_extended_logging:
+                            #         logger.debug('Debug: Setting failed_stop_attempt to True')
+                            #     failed_stop_attempt = True
+
+                            # self.awaiting_speech_end = False
 
                 if self.use_extended_logging:
                     logger.debug('Debug: Checking if recording stopped')
@@ -2420,7 +2466,69 @@ class AudioToTextRecorder:
         if self.use_extended_logging:
             logger.debug('Debug: Exiting _recording_worker method')
 
+    def _process_transcription_queue(self):
+        """
+        Process transcription queue asynchronously while recording continues.
+        This ensures audio capture never stops, even during transcription.
+        """
+        logger.info("Starting async transcription processor")
+        self.is_transcribing = True
+        
+        try:
+            while self.is_running:
+                try:
+                    # Get segment from queue with timeout
+                    segment_frames = self.transcription_queue.get(timeout=0.5)
+                    
+                    if not segment_frames:
+                        continue
+                    
+                    logger.info(f"Processing transcription for segment with {len(segment_frames)} frames")
+                    
+                    # Save current frames and set segment frames for transcription
+                    original_frames = copy.deepcopy(self.frames)
+                    original_is_recording = self.is_recording
+                    
+                    # Temporarily set frames for transcription
+                    self.frames = segment_frames
+                    self.is_recording = True  # Ensure transcription can proceed
+                    
+                    # Perform transcription
+                    try:
+                        transcription = self.transcribe()
+                        
+                        # # Call completion callback if provided
+                        # if self.on_transcription_complete:
+                        #     self._run_callback(self.on_transcription_complete, transcription)
+                        
+                        # logger.info(f"Async transcription completed: {transcription[:50]}...")
 
+                        if transcription:
+                            logger.info(f"Async transcription completed: {transcription[:50]}...")
+                        else:
+                            logger.warning("Async transcription returned empty result")
+                    except Exception as e:
+                        logger.error(f"Error during async transcription: {e}", exc_info=True)
+                    finally:
+                        # Restore original frames and state
+                        self.frames = original_frames
+                        self.is_recording = original_is_recording
+                    
+                    # Mark task as done
+                    self.transcription_queue.task_done()
+                    
+                except queue.Empty:
+                    # No segments to process, continue waiting
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in transcription queue processing: {e}", exc_info=True)
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Fatal error in transcription processor: {e}", exc_info=True)
+        finally:
+            self.is_transcribing = False
+            logger.info("Async transcription processor stopped")
 
 
     def _realtime_worker(self):

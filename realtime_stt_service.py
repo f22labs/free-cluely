@@ -489,7 +489,7 @@ class RealtimeSTTService:
                             self._send_message({
                                 "type": "transcription_complete",
                                 "text": cleaned,
-                                "full_transcript": " ".join(self.full_transcript),
+                                "full_transcript": "\n".join(self.full_transcript),
                                 "timestamp": completion_iso,
                                 "metrics": metrics_payload
                             })
@@ -534,7 +534,7 @@ class RealtimeSTTService:
                                 self._send_message({
                                     "type": "transcription_complete",
                                     "text": cleaned,
-                                    "full_transcript": " ".join(self.full_transcript),
+                                    "full_transcript": "\n".join(self.full_transcript),
                                     "timestamp": completion_iso,
                                     "metrics": metrics_payload
                                 })

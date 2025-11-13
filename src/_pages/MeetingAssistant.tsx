@@ -383,6 +383,10 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
         const fullText = data.fullTranscript || data.text || ""
         transcriptRef.current = fullText
         setTranscript(fullText)
+        window.electronAPI.logToTerminal("info", "===== REALTIME UPDATE =====")
+        window.electronAPI.logToTerminal("info", "Full text:", fullText)
+        window.electronAPI.logToTerminal("info", "Text length:", fullText.length)
+        window.electronAPI.logToTerminal("info", "Lines:", fullText.split('\n').length)
         console.log("[MeetingAssistant] Updated transcript:", fullText.substring(0, 50) + "...")
         // DO NOT generate suggestions on real-time updates - only on complete sentences
         if (data.metrics) {
@@ -888,4 +892,3 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
 }
 
 export default MeetingAssistant
-

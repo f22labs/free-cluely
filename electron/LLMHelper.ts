@@ -504,6 +504,8 @@ export class LLMHelper {
       const llmCallStartIso = new Date(llmCallStartEpochMs).toISOString();
       let attempts = 0;
 
+      logger.info("[LLMHelper] generateMeetingSuggestion transcript:", transcript);
+
       const prompt = `You are an AI meeting assistant helping during a live meeting. 
 
 SYSTEM CONTEXT:
