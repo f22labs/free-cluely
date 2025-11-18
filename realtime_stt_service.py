@@ -79,6 +79,8 @@ class RealtimeSTTService:
         
         # Don't create recorder here - will be created in run() with callbacks
         self.recorder = None
+        self._preserve_recorder = False  # Flag to preserve recorder in pre-init mode
+        self._shared_stop_queue = None  # Shared stop queue for pre-init mode
         self._send_message({"type": "status", "status": "initialized", "timestamp": self._get_timestamp()})
     
     def _get_timestamp(self):
@@ -318,8 +320,8 @@ class RealtimeSTTService:
         
         self.is_recording = False
         
-        # Close recorder if it exists
-        if self.recorder:
+        # Close recorder if it exists, but preserve it in pre-init mode
+        if self.recorder and not self._preserve_recorder:
             try:
                 # AudioToTextRecorder is a context manager - try to close it properly
                 if hasattr(self.recorder, '__exit__'):
@@ -344,8 +346,13 @@ class RealtimeSTTService:
             "timestamp": self._get_timestamp()
         })
     
-    def run(self):
-        """Main run loop - continuously transcribe audio"""
+    def initialize_recorder(self):
+        """Initialize the AudioToTextRecorder if not already initialized"""
+        if self.recorder is not None:
+            # Already initialized
+            self._send_message({"type": "status", "status": "recorder_ready", "timestamp": self._get_timestamp()})
+            return
+        
         # Track all real-time updates to prevent losing any text
         self.realtime_buffer = []
         self.last_audio_detected = time.monotonic()
@@ -388,11 +395,14 @@ class RealtimeSTTService:
                     self.first_partial_latency_ms = latency_ms
                 self.partial_logged = True
 
-            complete_sentences = "\n".join(self.full_transcript)
-            full_display = f"{complete_sentences}\n{cleaned}".strip() if complete_sentences else cleaned
+            display_segments = self.full_transcript + ([cleaned] if cleaned else [])
+            full_display = "\n".join(display_segments).strip()
 
             emit_timestamp_iso = self._get_timestamp()
             emit_epoch_ms = self._get_epoch_ms()
+
+            self._info(f"Cleaned text: {cleaned}")
+            self._info(f"Full display: {full_display}")
 
             self._send_message({
                 "type": "realtime_update",
@@ -411,9 +421,160 @@ class RealtimeSTTService:
                 }
             })
             self._append_to_file(cleaned, is_realtime=True)
-
-            # Start a suggestion timeout if we have not received a final transcription yet.
             self._schedule_suggestion_timeout(cleaned, full_display)
+        
+        # Store callback for use in run()
+        self._on_realtime_update = on_realtime_update
+        
+        # Create recorder with callbacks
+        try:
+            recorder_config = {
+                'spinner': False,
+                'model': self.model,
+                'realtime_model_type': self.realtime_model,
+                'language': self.language,
+                'silero_sensitivity': 0.15,
+                'webrtc_sensitivity': 0,
+                'post_speech_silence_duration': 2.5,
+                'min_length_of_recording': 0.3,
+                'min_gap_between_recordings': 0.05,
+                'enable_realtime_transcription': True,
+                'realtime_processing_pause': 0.01,
+                'on_realtime_transcription_update': on_realtime_update,
+                'silero_deactivity_detection': True,
+                'early_transcription_on_silence': 1.8,
+                'silero_use_onnx': True,
+                'beam_size': 10,
+                'beam_size_realtime': 7,
+                'no_log_file': False,
+                'faster_whisper_vad_filter': True,
+                'use_microphone': True,
+                'download_root': None,
+            }
+            
+            self._send_message({"type": "status", "status": "initializing_recorder", "timestamp": self._get_timestamp()})
+            start = time.time()
+            self._debug("Creating AudioToTextRecorder with config")
+            self._debug(f"Config: model={self.model}, realtime_model={self.realtime_model}, language={self.language}")
+            
+            try:
+                self._debug(f"Creating recorder with VAD: silero={recorder_config['silero_sensitivity']}, webrtc={recorder_config['webrtc_sensitivity']}")
+                
+                self.recorder = AudioToTextRecorder(**recorder_config)
+                self.recorder_config = recorder_config
+                self._debug("AudioToTextRecorder created successfully and ready to listen")
+                
+                try:
+                    import pyaudio
+                    end = time.time()
+                    self._info(f"Time Taken to initialize AudioToTextRecorder: {end-start} seconds")
+                    start = time.time()
+                    p_verify = pyaudio.PyAudio()
+                    end = time.time()
+                    self._info(f"Time Taken to initialize pyaudio: {end-start} seconds")
+                    start = time.time()
+                    default_input = p_verify.get_default_input_device_info()
+                    end = time.time()
+                    self._info(f"Time Taken to get default input device info: {end-start} seconds")
+                    self._info(f"[PLATFORM] Recorder active on microphone: {default_input['name']} (index={default_input['index']})")
+                    p_verify.terminate()
+                except Exception as verify_error:
+                    self._warn(f"[PLATFORM] Could not verify microphone after recorder creation: {verify_error}")
+                
+            except Exception as init_error:
+                self._send_error(f"Error creating recorder: {init_error}")
+                self._warn("Recorder creation failed on Apple Silicon")
+                self._info("[PLATFORM] Common fixes for M1/M2/M3:")
+                self._info("  1. Install PortAudio: brew install portaudio")
+                self._info("  2. Reinstall PyAudio: pip install --force-reinstall pyaudio")
+                self._info("  3. Check microphone permissions in System Settings")
+                self._info("  4. Try running from Terminal (not IDE) to get permission prompt")
+                import traceback
+                self._debug(f"Init traceback: {traceback.format_exc()}")
+                raise
+            
+            self._send_message({"type": "status", "status": "recorder_ready", "timestamp": self._get_timestamp()})
+            
+        except Exception as init_error:
+            self._send_error(f"Error creating recorder: {init_error}")
+            raise
+
+    def run(self):
+        """Main run loop - continuously transcribe audio"""
+        # Initialize recorder if not already initialized
+        if self.recorder is None:
+            self.initialize_recorder()
+        
+        # Use stored callback or define it if not pre-initialized
+        if hasattr(self, '_on_realtime_update'):
+            on_realtime_update = self._on_realtime_update
+        else:
+            # Define callback (shouldn't happen if initialize_recorder was called)
+            def on_realtime_update(text):
+                """Callback for real-time transcription updates"""
+                self._info(f"[Transcription Update] iteration {self.current_iteration_index}: {text}")
+                now_monotonic = time.monotonic()
+                self.last_audio_detected = now_monotonic
+
+                if not text:
+                    return
+
+                cleaned = self._preprocess_text(text.strip())
+                if not cleaned:
+                    return
+
+                error_patterns = [
+                    'no clip', 'no clips', 'clip timestamp', 'clip timestamps',
+                    'timestamp found', 'vad filter', 'set vad', 'runtime error',
+                    'exception', 'error:', 'traceback'
+                ]
+                cleaned_lower = cleaned.lower()
+                if any(pattern in cleaned_lower for pattern in error_patterns):
+                    return
+
+                if cleaned not in self.realtime_buffer:
+                    self.realtime_buffer.append(cleaned)
+
+                if cleaned == self.last_realtime_update:
+                    return
+
+                self.last_realtime_update = cleaned
+                self.partial_update_count += 1
+
+                latency_ms = None
+                if self.current_iteration_start is not None:
+                    latency_ms = round((now_monotonic - self.current_iteration_start) * 1000, 2)
+                    if not self.partial_logged:
+                        self.first_partial_latency_ms = latency_ms
+                    self.partial_logged = True
+
+                display_segments = self.full_transcript + ([cleaned] if cleaned else [])
+                full_display = "\n".join(display_segments).strip()
+
+                emit_timestamp_iso = self._get_timestamp()
+                emit_epoch_ms = self._get_epoch_ms()
+
+                self._info(f"Cleaned text: {cleaned}")
+                self._info(f"Full display: {full_display}")
+
+                self._send_message({
+                    "type": "realtime_update",
+                    "text": cleaned,
+                    "fullTranscript": full_display,
+                    "timestamp": emit_timestamp_iso,
+                    "metrics": {
+                        "iteration": self.current_iteration_index,
+                        "partial_index": self.partial_update_count,
+                        "latency_ms": latency_ms,
+                        "first_partial_latency_ms": self.first_partial_latency_ms,
+                        "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                        "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                        "python_emit_timestamp": emit_timestamp_iso,
+                        "python_emit_epoch_ms": emit_epoch_ms
+                    }
+                })
+                self._append_to_file(cleaned, is_realtime=True)
+                self._schedule_suggestion_timeout(cleaned, full_display)
         
         def on_transcription_complete(text):
             """Callback for completed transcriptions - called by recorder.text()"""
@@ -547,129 +708,89 @@ class RealtimeSTTService:
                 self._debug(f"Callback traceback: {traceback.format_exc()}")
         
         # Platform detection and M1-specific diagnostics
-        import platform
-        system_info = platform.system()
-        machine = platform.machine()
-        self._info(f"[PLATFORM] System: {system_info}, Architecture: {machine}")
+        # import platform
+        # system_info = platform.system()
+        # machine = platform.machine()
+        # self._info(f"[PLATFORM] System: {system_info}, Architecture: {machine}")
         
         # Check for Apple Silicon (M1/M2/M3/M4)
-        is_apple_silicon = machine == 'arm64' and system_info == 'Darwin'
-        if is_apple_silicon:
-            self._info("[PLATFORM] Detected Apple Silicon (M1/M2/M3/M4) - checking compatibility...")
+        # is_apple_silicon = machine == 'arm64' and system_info == 'Darwin'
+        # if is_apple_silicon:
+        #     self._info("[PLATFORM] Detected Apple Silicon (M1/M2/M3/M4) - checking compatibility...")
             
-            # Test microphone access before creating recorder
-            try:
-                import pyaudio
-                p_test = pyaudio.PyAudio()
-                try:
-                    default_input = p_test.get_default_input_device_info()
-                    self._info(f"[PLATFORM] Microphone detected: {default_input['name']} (index={default_input['index']}, sample_rate={default_input['defaultSampleRate']} Hz)")
+        #     # Test microphone access before creating recorder
+        #     try:
+        #         import pyaudio
+        #         p_test = pyaudio.PyAudio()
+        #         try:
+        #             default_input = p_test.get_default_input_device_info()
+        #             self._info(f"[PLATFORM] Microphone detected: {default_input['name']} (index={default_input['index']}, sample_rate={default_input['defaultSampleRate']} Hz)")
                     
-                    # Try to open a test stream
-                    test_stream = p_test.open(
-                        format=pyaudio.paInt16,
-                        channels=1,
-                        rate=16000,
-                        input=True,
-                        frames_per_buffer=1024
-                    )
-                    self._info("[PLATFORM] Microphone stream test passed on Apple Silicon")
-                    test_stream.stop_stream()
-                    test_stream.close()
-                except Exception as mic_error:
-                    self._warn(f"[PLATFORM] Microphone access test failed on Apple Silicon: {mic_error}")
-                    self._warn("[PLATFORM] Possible causes: permissions not granted, PyAudio mismatch, or PortAudio issue")
-                finally:
-                    p_test.terminate()
-            except ImportError:
-                self._debug("[PLATFORM] PyAudio not available for microphone test")
-            except Exception as e:
-                self._warn(f"[PLATFORM] Error testing microphone: {e}")
+        #             # Try to open a test stream
+        #             test_stream = p_test.open(
+        #                 format=pyaudio.paInt16,
+        #                 channels=1,
+        #                 rate=16000,
+        #                 input=True,
+        #                 frames_per_buffer=1024
+        #             )
+        #             self._info("[PLATFORM] Microphone stream test passed on Apple Silicon")
+        #             test_stream.stop_stream()
+        #             test_stream.close()
+        #         except Exception as mic_error:
+        #             self._warn(f"[PLATFORM] Microphone access test failed on Apple Silicon: {mic_error}")
+        #             self._warn("[PLATFORM] Possible causes: permissions not granted, PyAudio mismatch, or PortAudio issue")
+        #         finally:
+        #             p_test.terminate()
+        #     except ImportError:
+        #         self._debug("[PLATFORM] PyAudio not available for microphone test")
+            # except Exception as e:
+            #     self._warn(f"[PLATFORM] Error testing microphone: {e}")
         
         # Create recorder with callbacks
-        try:
-            recorder_config = {
-                'spinner': False,
-                'model': self.model,
-                'realtime_model_type': self.realtime_model,
-                'language': self.language,
-                # Voice Activity Detection settings - OPTIMIZED FOR FAST SPEECH & LONG SILENCE
-                # Note: silero_sensitivity: 0.0 = most sensitive, 1.0 = least sensitive (we want MUCH lower for fast speech)
-                #       webrtc_sensitivity: 0 = most sensitive, 3 = least sensitive (we want 0 for maximum sensitivity)
-                'silero_sensitivity': 0.15,  # VERY sensitive (0.15 = catches fast speech and speech after silence)
-                'webrtc_sensitivity': 0,  # MAXIMUM sensitivity (0 = catches every speech event, even after long silence)
-                # CRITICAL: Balanced silence duration - short enough to detect fast speech, long enough for continuous speech
-                'post_speech_silence_duration': 2.5,  # 2.5s - faster response than 3.0s, but still captures long speech
-                'min_length_of_recording': 0.3,  # 0.3s - slightly longer for better quality, prevents premature cuts on fast speech
-                'min_gap_between_recordings': 0.05,  # 0.05s - smaller gap for faster detection, ensures no missed words
-                'enable_realtime_transcription': True,
-                'realtime_processing_pause': 0.01,  # Faster updates (10ms) for continuous speech
-                'on_realtime_transcription_update': on_realtime_update,
-                'silero_deactivity_detection': True,  # Enable deactivity detection for better silence handling
-                'early_transcription_on_silence': 1.8,  # 1.8s - faster finalization, prevents waiting too long (good for fast speech)
-                # Additional VAD settings for better detection
-                'silero_use_onnx': True,  # Use ONNX for faster VAD processing
-                # Optimized beam size for better accuracy during fast and continuous speech
-                'beam_size': 10,  # Higher beam size for final transcription = better accuracy
-                'beam_size_realtime': 7,  # Higher real-time beam = better accuracy for fast speech (7-8 is optimal balance)
-                # Note: compression_ratio_threshold, log_prob_threshold, and no_speech_threshold are not 
-                # direct AudioToTextRecorder parameters - they're lower-level Whisper parameters
-                # that are handled internally by the model configuration
-                'no_log_file': False,
-                'faster_whisper_vad_filter': True,  # Enable VAD filtering to prevent "No clip timestamps" error
-                # Try to ensure microphone access
-                'use_microphone': True,  # Explicitly enable microphone
-                # Add model caching to avoid reload delays
-                'download_root': None,  # Use default cache location
-            }
-            
-            self._send_message({"type": "status", "status": "initializing_recorder", "timestamp": self._get_timestamp()})
-            self._debug("Creating AudioToTextRecorder with config")
-            self._debug(f"Config: model={self.model}, realtime_model={self.realtime_model}, language={self.language}")
-            
-            try:
-                self._debug(f"Creating recorder with VAD: silero={recorder_config['silero_sensitivity']}, webrtc={recorder_config['webrtc_sensitivity']}")
-                
-                if is_apple_silicon:
-                    self._debug("Creating AudioToTextRecorder on Apple Silicon (first load may take longer)")
-                
-                self.recorder = AudioToTextRecorder(**recorder_config)
-                self._debug("AudioToTextRecorder created successfully and ready to listen")
-                
-                if is_apple_silicon:
-                    try:
-                        import pyaudio
-                        p_verify = pyaudio.PyAudio()
-                        default_input = p_verify.get_default_input_device_info()
-                        self._info(f"[PLATFORM] Recorder active on microphone: {default_input['name']} (index={default_input['index']})")
-                        p_verify.terminate()
-                    except Exception as verify_error:
-                        self._warn(f"[PLATFORM] Could not verify microphone after recorder creation: {verify_error}")
-                
-            except Exception as init_error:
-                self._send_error(f"Error creating recorder: {init_error}")
-                if is_apple_silicon:
-                    self._warn("Recorder creation failed on Apple Silicon")
-                    self._info("[PLATFORM] Common fixes for M1/M2/M3:")
-                    self._info("  1. Install PortAudio: brew install portaudio")
-                    self._info("  2. Reinstall PyAudio: pip install --force-reinstall pyaudio")
-                    self._info("  3. Check microphone permissions in System Settings")
-                    self._info("  4. Try running from Terminal (not IDE) to get permission prompt")
-                import traceback
-                self._debug(f"Init traceback: {traceback.format_exc()}")
-                raise
-            
+        # The recorder is now initialized in initialize_recorder()
+        # self.recorder = AudioToTextRecorder(**recorder_config)
+        # self.recorder_config = recorder_config
+        # self._debug("AudioToTextRecorder created successfully and ready to listen")
+        
+        # if is_apple_silicon:
+        #     try:
+        #         import pyaudio
+        #         end= time.time()
+        #         self._info(f"Time Taken to initialize AudioToTextRecorder: {end-start} seconds")
+        #         start = time.time()
+        #         p_verify = pyaudio.PyAudio()
+        #         end = time.time()
+        #         self._info(f"Time Taken to initialize pyaudio: {end-start} seconds")
+        #         start = time.time()
+        #         default_input = p_verify.get_default_input_device_info()
+        #         end = time.time()
+        #         self._info(f"Time Taken to get default input device info: {end-start} seconds")
+        #         self._info(f"[PLATFORM] Recorder active on microphone: {default_input['name']} (index={default_input['index']})")
+        #         p_verify.terminate()
+        #     except Exception as verify_error:
+        #         self._warn(f"[PLATFORM] Could not verify microphone after recorder creation: {verify_error}")
+        
+        # Start recording if not already started
+        if not self.is_recording:
             self.start_recording()
-            self._send_message({"type": "status", "status": "ready", "timestamp": self._get_timestamp()})
-            self._debug("Recorder started; transcription loop active")
-            self._debug("Callbacks will fire when speech is detected")
-            
-            # Listen continuously
-            import threading
-            import queue
+        
+        self._send_message({"type": "status", "status": "ready", "timestamp": self._get_timestamp()})
+        self._debug("Recorder started; transcription loop active")
+        self._debug("Callbacks will fire when speech is detected")
+        
+        # Listen continuously
+        import threading
+        import queue
+        
+        # Use shared stop queue if available (pre-init mode), otherwise create new one
+        if self._shared_stop_queue is not None:
+            stop_queue = self._shared_stop_queue
+            self._debug("Using shared stop queue from pre-init mode")
+        else:
             stop_queue = queue.Queue()
             
-            # Thread to listen for stop commands
+            # Thread to listen for stop commands (only if not in pre-init mode)
             def stdin_listener():
                 try:
                     while True:
@@ -692,37 +813,38 @@ class RealtimeSTTService:
             stdin_thread = threading.Thread(target=stdin_listener, daemon=True)
             stdin_thread.start()
             self._debug("stdin listener thread started")
-            
-            self.audio_watchdog_stop = threading.Event()
-            self.audio_watchdog_last_warning = None
+        
+        self.audio_watchdog_stop = threading.Event()
+        self.audio_watchdog_last_warning = None
 
-            def audio_watchdog():
-                self._debug("Audio watchdog thread started")
-                while not self.audio_watchdog_stop.is_set():
-                    time.sleep(3)
-                    if not self.is_recording:
-                        continue
-                    if self.last_audio_detected is None:
-                        continue
-                    gap = time.monotonic() - self.last_audio_detected
-                    if gap > 5:
-                        if (
-                            self.audio_watchdog_last_warning is None
-                            or (time.monotonic() - self.audio_watchdog_last_warning) > 5
-                        ):
-                            self.audio_watchdog_last_warning = time.monotonic()
-                            self._info(f"[AUDIO WATCHDOG] No audio detected for {gap:.2f} seconds. Waiting for speech input...")
+        def audio_watchdog():
+            self._debug("Audio watchdog thread started")
+            while not self.audio_watchdog_stop.is_set():
+                time.sleep(3)
+                if not self.is_recording:
+                    continue
+                if self.last_audio_detected is None:
+                    continue
+                gap = time.monotonic() - self.last_audio_detected
+                if gap > 5:
+                    if (
+                        self.audio_watchdog_last_warning is None
+                        or (time.monotonic() - self.audio_watchdog_last_warning) > 5
+                    ):
+                        self.audio_watchdog_last_warning = time.monotonic()
+                        self._info(f"[AUDIO WATCHDOG] No audio detected for {gap:.2f} seconds. Waiting for speech input...")
 
-            self.audio_watchdog_thread = threading.Thread(target=audio_watchdog, daemon=True)
-            self.audio_watchdog_thread.start()
-            
-            # Main transcription loop - recorder.text() requires a callback
-            # This matches the pattern from realtime_stt.py: while True: recorder.text(callback)
-            iteration = 0
-            consecutive_errors = 0
-            max_consecutive_errors = 5
-            
-            self._debug("Starting main transcription loop")
+        self.audio_watchdog_thread = threading.Thread(target=audio_watchdog, daemon=True)
+        self.audio_watchdog_thread.start()
+        
+        # Main transcription loop - recorder.text() requires a callback
+        # This matches the pattern from realtime_stt.py: while True: recorder.text(callback)
+        iteration = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
+        self._debug("Starting main transcription loop")
+        try: 
             while True:
                 iteration += 1
                 self._debug(f"Entering loop iteration {iteration} (consecutive errors: {consecutive_errors})")
@@ -758,7 +880,11 @@ class RealtimeSTTService:
                     # Get transcription - pass callback function (blocks until speech is detected)
                     # This matches the pattern: recorder.text(callback)
                     self._debug(f"Starting recorder.text() for iteration {iteration}")
-                    self._debug(f"VAD Settings: silero={recorder_config.get('silero_sensitivity')}, webrtc={recorder_config.get('webrtc_sensitivity')}")
+                    # Only log VAD settings if recorder_config is available
+                    if hasattr(self, 'recorder_config') and self.recorder_config:
+                        self._debug(f"VAD Settings: silero={self.recorder_config.get('silero_sensitivity')}, webrtc={self.recorder_config.get('webrtc_sensitivity')}")
+                    else:
+                        self._debug("VAD Settings: using pre-initialized recorder configuration")
                     
                     # recorder.text() blocks until speech is detected and processed
                     # It will call:
@@ -767,8 +893,8 @@ class RealtimeSTTService:
                     # It should return the transcribed text or None
                     self._debug(f"Calling recorder.text() - iteration {iteration}")
                     
-                    if is_apple_silicon:
-                        self._debug("Recorder running on Apple Silicon; monitor callbacks for microphone access issues")
+                    # if is_apple_silicon:
+                    #     self._debug("Recorder running on Apple Silicon; monitor callbacks for microphone access issues")
                     start_block = time.monotonic()
                     # Call recorder.text() - this blocks until speech is detected
                     result = self.recorder.text(on_transcription_complete)
@@ -828,7 +954,7 @@ class RealtimeSTTService:
                             if last_buffer_entry and last_buffer_entry not in self.full_transcript:
                                 self._debug(f"Attempting to save buffer entry as fallback: '{last_buffer_entry[:50]}...'")
                                 # Don't add automatically - let next successful transcription handle it
-                    
+                        
                     # Check if recorder is still valid
                     if self.recorder is None:
                         self._debug("Recorder became None after error. Cannot continue.")
@@ -847,7 +973,7 @@ class RealtimeSTTService:
                     self._debug(f"Waiting {wait_time:.1f} seconds before retrying...")
                     time.sleep(wait_time)
                     # Continue loop - don't exit
-                    
+                
         except KeyboardInterrupt:
             self._send_message({"type": "status", "status": "stopped", "timestamp": self._get_timestamp()})
         except Exception as e:
@@ -889,6 +1015,7 @@ def main():
             parser.add_argument('--model', type=str, default='large-v3', help='Whisper model (large-v3 = latest and most accurate)')
             parser.add_argument('--realtime-model', type=str, default='base.en', help='Real-time model (base.en = better accuracy, small.en = even better)')
             parser.add_argument('--language', type=str, default='en', help='Language code')
+            parser.add_argument('--pre-init', action='store_true', help='Pre-initialize recorder and wait for start command')
             
             args = parser.parse_args()
             
@@ -899,9 +1026,74 @@ def main():
                 language=args.language
             )
             
-            # Auto-start recording
-            service.start_recording()
-            service.run()
+            if args.pre_init:
+                # Pre-initialize recorder but don't start recording yet
+                service._preserve_recorder = True  # Preserve recorder for multiple start/stop cycles
+                service.initialize_recorder()
+                # Wait for start command on stdin
+                import threading
+                import queue
+                stop_queue = queue.Queue()
+                service._shared_stop_queue = stop_queue  # Share stop queue with run()
+                run_thread = None
+                
+                def stdin_listener():
+                    nonlocal run_thread
+                    try:
+                        while True:
+                            line = sys.stdin.readline()
+                            if not line:
+                                break
+                            try:
+                                command = json.loads(line.strip())
+                                if command.get("action") == "start":
+                                    # Check if already running
+                                    if run_thread and run_thread.is_alive():
+                                        service._debug("Recording already in progress, ignoring start command")
+                                        continue
+                                    
+                                    service.start_recording()
+                                    # Send "ready" status after starting recording
+                                    service._send_message({"type": "status", "status": "ready", "timestamp": service._get_timestamp()})
+                                    
+                                    # Run in a separate thread so we can handle multiple cycles
+                                    def run_transcription():
+                                        try:
+                                            service.run()
+                                        except Exception as e:
+                                            service._send_error(f"Error in transcription loop: {e}")
+                                        finally:
+                                            # Reset run_thread when transcription loop exits
+                                            nonlocal run_thread
+                                            run_thread = None
+                                            service._debug("Transcription loop exited, ready for next start")
+                                    
+                                    run_thread = threading.Thread(target=run_transcription, daemon=True)
+                                    run_thread.start()
+                                    
+                                elif command.get("action") == "stop":
+                                    # Put stop command in queue for run() to handle
+                                    stop_queue.put("stop")
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                    except:
+                        pass
+                
+                stdin_thread = threading.Thread(target=stdin_listener, daemon=True)
+                stdin_thread.start()
+                
+                # Keep the process alive
+                try:
+                    while True:
+                        time.sleep(0.1)
+                        if not stdin_thread.is_alive():
+                            break
+                except KeyboardInterrupt:
+                    pass
+            else:
+                # Auto-start recording
+                service.start_recording()
+                service.run()
         else:
             # Interactive mode - read config from stdin
             config_line = sys.stdin.readline()

@@ -165,3 +165,99 @@ button, input, select, textarea, .interactive {
   animation: shimmer 3s ease-in-out infinite;
   pointer-events: none;
 }
+
+/* Resize Handles */
+.resize-handle {
+  position: absolute;
+  z-index: 9999;
+  -webkit-app-region: no-drag;
+}
+
+/* Corner handles */
+.resize-handle-nw {
+  top: 0;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+
+.resize-handle-ne {
+  top: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+
+.resize-handle-sw {
+  bottom: 0;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+
+.resize-handle-se {
+  bottom: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+
+/* Edge handles */
+.resize-handle-n {
+  top: 0;
+  left: 12px;
+  right: 12px;
+  height: 4px;
+  cursor: ns-resize;
+}
+
+.resize-handle-s {
+  bottom: 0;
+  left: 12px;
+  right: 12px;
+  height: 4px;
+  cursor: ns-resize;
+}
+
+.resize-handle-e {
+  right: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 4px;
+  cursor: ew-resize;
+}
+
+.resize-handle-w {
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 4px;
+  cursor: ew-resize;
+}
+
+/* Hover effect for resize handles */
+.resize-handle:hover {
+  background-color: rgba(59, 130, 246, 0.3);
+  transition: background-color 0.2s ease;
+}
+
+/* Corner handles hover with rounded corners */
+.resize-handle-nw:hover {
+  border-top-left-radius: 8px;
+}
+
+.resize-handle-ne:hover {
+  border-top-right-radius: 8px;
+}
+
+.resize-handle-sw:hover {
+  border-bottom-left-radius: 8px;
+}
+
+.resize-handle-se:hover {
+  border-bottom-right-radius: 8px;
+}

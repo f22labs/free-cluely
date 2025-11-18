@@ -145,6 +145,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     appState.minimizeMainWindow()
   })
 
+  ipcMain.handle("resize-window", async (event, width: number, height: number) => {
+    appState.resizeWindow(width, height)
+  })
+
   // LLM Model Management Handlers
   ipcMain.handle("get-current-llm-config", async () => {
     try {

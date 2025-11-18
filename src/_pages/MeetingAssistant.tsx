@@ -37,11 +37,14 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const [transcript, setTranscript] = useState("")
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
-  const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({ 
-    provider: "gemini", 
-    model: "gemini-2.0-flash" 
+  const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({
+    provider: "gemini",
+    model: "gemini-2.0-flash"
   })
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isResizing, setIsResizing] = useState(false)
+  const [resizeDirection, setResizeDirection] = useState<"n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se" | null>(null)
+  const resizeStartRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
   
   const transcriptRef = useRef<string>("")
   const suggestionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -65,10 +68,11 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const lastSuggestionMetricsRef = useRef<MeetingSuggestionMetrics | undefined>(undefined)
   const previousSuggestionCountRef = useRef<number>(0)
   const partialTimeoutStateRef = useRef<Map<number, number>>(new Map())
+  
 const suggestionsContainerRef = useRef<HTMLDivElement>(null)
 const [showNewSuggestionIndicator, setShowNewSuggestionIndicator] = useState(false)
 const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "ready">("idle")
-
+const lastRealtimeTextRef = useRef("")
   // Component mount logging
   useEffect(() => {
     console.log("[MeetingAssistant] Component mounted/rendered")
@@ -380,14 +384,43 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
     const unsubscribeUpdate = window.electronAPI.onRealtimeTranscriptionUpdate?.((data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => {
       console.log("[MeetingAssistant] Received realtime update:", data)
       if (data && (data.fullTranscript || data.text)) {
-        const fullText = data.fullTranscript || data.text || ""
-        transcriptRef.current = fullText
-        setTranscript(fullText)
-        window.electronAPI.logToTerminal("info", "===== REALTIME UPDATE =====")
-        window.electronAPI.logToTerminal("info", "Full text:", fullText)
-        window.electronAPI.logToTerminal("info", "Text length:", fullText.length)
-        window.electronAPI.logToTerminal("info", "Lines:", fullText.split('\n').length)
-        console.log("[MeetingAssistant] Updated transcript:", fullText.substring(0, 50) + "...")
+        // const fullText = data.fullTranscript || data.text || ""
+        // transcriptRef.current = fullText
+        // // setTranscript(fullText)
+        // setTranscript(prev => {
+        //   if (!fullText.trim()) return prev
+        //   if (prev.endsWith(fullText)) return prev   // avoid duplicates
+        //   return prev ? `${prev}\n${fullText}` : fullText
+        // })
+        const incoming = data.fullTranscript || data.text || ""
+        if (!incoming.trim()) return
+        window.electronAPI.logToTerminal("info", "===== REALTIME PUSH TO UI =====")
+        window.electronAPI.logToTerminal("info", "Incoming:", incoming)
+        window.electronAPI.logToTerminal("info", "Incoming length:", incoming.length)
+        window.electronAPI.logToTerminal("info", "Lines:", incoming.split('\n').length)
+        console.log("[MeetingAssistant] Updated transcript:", incoming.substring(0, 50) + "...")
+        setTranscript(prev => {
+          if (!lastRealtimeTextRef.current) {
+            lastRealtimeTextRef.current = incoming
+            return incoming
+          }
+
+          if (incoming.length <= lastRealtimeTextRef.current.length) {
+            lastRealtimeTextRef.current = incoming
+            return prev
+          }
+
+          const newChunk = incoming.slice(lastRealtimeTextRef.current.length).trim()
+          lastRealtimeTextRef.current = incoming
+          if (!newChunk) return prev
+
+          return prev ? `${prev}\n${newChunk}` : newChunk
+        })
+        // window.electronAPI.logToTerminal("info", "===== REALTIME UPDATE =====")
+        // window.electronAPI.logToTerminal("info", "Full text:", fullText)
+        // window.electronAPI.logToTerminal("info", "Text length:", fullText.length)
+        // window.electronAPI.logToTerminal("info", "Lines:", fullText.split('\n').length)
+        // console.log("[MeetingAssistant] Updated transcript:", fullText.substring(0, 50) + "...")
         // DO NOT generate suggestions on real-time updates - only on complete sentences
         if (data.metrics) {
           const elapsedSinceEmit = data.metrics.electron_emit_epoch_ms
@@ -409,6 +442,11 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
       console.log("[MeetingAssistant] Received transcription complete:", data)
       if (data && (data.fullTranscript || data.text)) {
         const fullText = data.fullTranscript || data.text || ""
+        window.electronAPI.logToTerminal("info", "===== REALTIME COMPLETE =====")
+        window.electronAPI.logToTerminal("info", "Full text:", fullText)
+        window.electronAPI.logToTerminal("info", "Text length:", fullText.length)
+        window.electronAPI.logToTerminal("info", "Lines:", fullText.split('\n').length)
+        console.log("[MeetingAssistant] Updated transcript:", fullText.substring(0, 50) + "...")
         transcriptRef.current = fullText
         setTranscript(fullText)
         console.log("[MeetingAssistant] Updated transcript (complete):", fullText.substring(0, 50) + "...")
@@ -662,10 +700,79 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
     setCurrentModel({ provider, model })
   }
 
+  // Resize handlers
+  const handleResizeStart = (direction: "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se") => (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    setIsResizing(true)
+    setResizeDirection(direction)
+
+    const contentElement = contentRef.current
+    if (!contentElement) return
+
+    const rect = contentElement.getBoundingClientRect()
+    resizeStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      width: rect.width,
+      height: rect.height
+    }
+  }
+
+  useEffect(() => {
+    if (!isResizing || !resizeDirection) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizeStartRef.current) return
+
+      const deltaX = e.clientX - resizeStartRef.current.x
+      const deltaY = e.clientY - resizeStartRef.current.y
+
+      let newWidth = resizeStartRef.current.width
+      let newHeight = resizeStartRef.current.height
+
+      // Calculate new dimensions based on direction
+      if (resizeDirection.includes('e')) {
+        newWidth = resizeStartRef.current.width + deltaX
+      }
+      if (resizeDirection.includes('w')) {
+        newWidth = resizeStartRef.current.width - deltaX
+      }
+      if (resizeDirection.includes('s')) {
+        newHeight = resizeStartRef.current.height + deltaY
+      }
+      if (resizeDirection.includes('n')) {
+        newHeight = resizeStartRef.current.height - deltaY
+      }
+
+      // Enforce minimum size
+      newWidth = Math.max(300, newWidth)
+      newHeight = Math.max(200, newHeight)
+
+      // Update window size via IPC
+      window.electronAPI.resizeWindow(Math.round(newWidth), Math.round(newHeight))
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+      setResizeDirection(null)
+      resizeStartRef.current = null
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing, resizeDirection])
+
   // Update dimensions
   useEffect(() => {
     const updateDimensions = () => {
-      if (contentRef.current) {
+      if (contentRef.current && !isResizing) {
         const height = contentRef.current.scrollHeight
         const width = contentRef.current.scrollWidth
         window.electronAPI.updateContentDimensions({ width, height })
@@ -681,61 +788,64 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
     return () => {
       resizeObserver.disconnect()
     }
-  }, [suggestions, transcript, isSettingsOpen])
+  }, [suggestions, transcript, isSettingsOpen, isResizing])
 
   return (
-    <div 
-      ref={contentRef} 
-      className="min-h-0 w-full rounded-lg shadow-2xl border border-gray-700/50 overflow-hidden"
+    <div
+      ref={contentRef}
+      className="min-h-0 w-full h-full rounded-lg shadow-2xl border border-gray-700/50 overflow-hidden flex flex-col"
       style={{
         background: 'linear-gradient(135deg, rgba(17, 24, 39, 0.98) 0%, rgba(31, 41, 55, 0.98) 100%)',
         backdropFilter: 'blur(20px)',
         WebkitBackdropFilter: 'blur(20px)',
         position: 'relative',
-        zIndex: 10,
-        WebkitAppRegion: 'no-drag'
+        zIndex: 10
       }}
     >
-      <div className="w-full h-full">
-        <div className="px-4 py-3" style={{ background: 'rgba(17, 24, 39, 0.95)' }}>
-          <Toast
-            open={toastOpen}
-            onOpenChange={setToastOpen}
-            variant={toastMessage.variant}
-            duration={3000}
-          >
-            <ToastTitle>{toastMessage.title}</ToastTitle>
-            <ToastDescription>{toastMessage.description}</ToastDescription>
-          </Toast>
+      <div className="w-full h-full flex flex-col overflow-hidden">
+        <Toast
+          open={toastOpen}
+          onOpenChange={setToastOpen}
+          variant={toastMessage.variant}
+          duration={3000}
+        >
+          <ToastTitle>{toastMessage.title}</ToastTitle>
+          <ToastDescription>{toastMessage.description}</ToastDescription>
+        </Toast>
 
-          {/* Header with Close Button */}
+        {/* Header Section - Fixed */}
+        <div className="px-4 py-3 flex-shrink-0" style={{ background: 'rgba(17, 24, 39, 0.95)' }}>
+          {/* Header with Close Button - Draggable */}
           <div
-            className="flex items-center justify-between mb-4 pb-3 border-b border-gray-600/70 bg-gray-800/30 px-2 py-2 rounded-md"
-            style={{ WebkitAppRegion: 'drag' }}
+            className="flex items-center justify-between mb-4 pb-3 border-b border-gray-600/70 bg-gray-800/30 px-2 py-2 rounded-md cursor-move select-none"
+            style={{
+              WebkitAppRegion: 'drag' as any,
+              userSelect: 'none'
+            }}
           >
-            <h2 className="text-xl font-bold text-white drop-shadow-lg">🤝 Meeting Assistant</h2>
-            <div className="flex gap-2 items-center" style={{ WebkitAppRegion: 'no-drag' }}>
+            <h2 className="text-xl font-bold text-white drop-shadow-lg pointer-events-none">🤝 Meeting Assistant</h2>
+            <div className="flex gap-2 items-center" style={{ WebkitAppRegion: 'no-drag' as any }}>
               <button
-                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
+                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium cursor-pointer"
                 onClick={() => setIsSettingsOpen(!isSettingsOpen)}
               >
                 ⚙️ Models
               </button>
               <button
-                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
+                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium cursor-pointer"
                 onClick={() => window.electronAPI.minimizeWindow?.()}
                 aria-label="Minimize"
               >
                 &minus;
               </button>
               <button
-                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium"
+                className="bg-gray-700/50 hover:bg-gray-700/70 transition-colors rounded-md px-3 py-1.5 text-xs text-white/90 font-medium cursor-pointer"
                 onClick={() => setView("queue")}
               >
                 ← Back
               </button>
               <button
-                className="bg-red-500/80 hover:bg-red-500/90 transition-colors rounded-md px-3 py-1.5 text-xs text-white font-medium"
+                className="bg-red-500/80 hover:bg-red-500/90 transition-colors rounded-md px-3 py-1.5 text-xs text-white font-medium cursor-pointer"
                 onClick={() => setView("queue")}
                 title="Close"
               >
@@ -746,13 +856,13 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
 
           {/* Settings */}
           {isSettingsOpen && (
-            <div className="mb-4">
+            <div className="mb-4" style={{ WebkitAppRegion: 'no-drag' as any }}>
               <ModelSelector onModelChange={handleModelChange} onChatOpen={() => {}} />
             </div>
           )}
 
           {/* System Prompt Input */}
-          <div className="mb-4">
+          <div className="mb-4" style={{ WebkitAppRegion: 'no-drag' as any }}>
             <label className="block text-sm font-medium text-white mb-2 drop-shadow">
               System Prompt (Context about you and the meeting)
             </label>
@@ -770,9 +880,9 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
           </div>
 
           {/* Recording Controls */}
-          <div className="mb-4 flex gap-2">
+          <div className="mb-4 flex gap-2" style={{ WebkitAppRegion: 'no-drag' as any }}>
             <button
-              className={`flex-1 px-4 py-3 rounded-lg text-sm font-semibold transition-colors shadow-lg ${
+              className={`flex-1 px-4 py-3 rounded-lg text-sm font-semibold transition-colors shadow-lg cursor-pointer ${
                 isRecording
                   ? "bg-red-500 hover:bg-red-600 text-white"
                   : "bg-green-500 hover:bg-green-600 text-white"
@@ -790,7 +900,7 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
             </button>
           </div>
           {isRecording && (
-            <div className="mb-4">
+            <div className="mb-4" style={{ WebkitAppRegion: 'no-drag' as any }}>
               {recorderStatus === "ready" ? (
                 <span className="inline-flex items-center gap-2 text-sm text-green-300 bg-green-900/40 px-3 py-1.5 rounded-lg">
                   <span className="animate-pulse">🎙️</span>
@@ -804,13 +914,16 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
               )}
             </div>
           )}
+        </div>
 
+        {/* Scrollable Content Section - Grows to fill space */}
+        <div className="flex-1 flex flex-col min-h-0 px-4 pb-4 gap-4 overflow-hidden" style={{ WebkitAppRegion: 'no-drag' as any }}>
           {/* Transcript Display - Always visible */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-white mb-2 drop-shadow">
+          <div className="flex-1 flex flex-col min-h-0">
+            <label className="block text-sm font-medium text-white mb-2 drop-shadow flex-shrink-0">
               📝 Live Transcript
             </label>
-            <div className="w-full px-4 py-3 rounded-lg bg-gray-800/90 text-gray-100 text-sm border border-gray-600/70 shadow-lg max-h-48 overflow-y-auto backdrop-blur-sm min-h-[100px]">
+            <div className="w-full px-4 py-3 rounded-lg bg-gray-800/90 text-gray-100 text-sm border border-gray-600/70 shadow-lg flex-1 overflow-y-auto backdrop-blur-sm min-h-[100px]">
               {transcript || (
                 <span className="text-gray-400 italic">
                   {isRecording
@@ -824,8 +937,8 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
           </div>
 
           {/* Suggestions Display - Single scrollable box */}
-          <div className="mb-4">
-            <div className="flex items-center justify-between mb-2">
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex items-center justify-between mb-2 flex-shrink-0">
               <label className="block text-sm font-medium text-white drop-shadow">
                 💡 AI Suggestion
               </label>
@@ -833,10 +946,10 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
                 <span className="text-xs text-gray-300 animate-pulse bg-blue-500/20 px-2 py-1 rounded">Generating...</span>
               )}
             </div>
-            <div className="relative">
+            <div className="relative flex-1 flex flex-col min-h-0">
               <div
                 ref={suggestionsContainerRef}
-                className="w-full rounded-lg bg-gray-800/90 border border-gray-600/70 shadow-lg max-h-64 overflow-y-auto backdrop-blur-sm"
+                className="w-full rounded-lg bg-gray-800/90 border border-gray-600/70 shadow-lg flex-1 overflow-y-auto backdrop-blur-sm"
               >
                 {suggestions.length === 0 ? (
                   <div className="w-full px-4 py-6 text-gray-300 text-sm text-center bg-gray-700/20">
@@ -887,6 +1000,43 @@ const [recorderStatus, setRecorderStatus] = useState<"idle" | "initializing" | "
           </div>
         </div>
       </div>
+
+      {/* Resize Handles */}
+      {/* Corners */}
+      <div
+        className="resize-handle resize-handle-nw"
+        onMouseDown={handleResizeStart('nw')}
+      />
+      <div
+        className="resize-handle resize-handle-ne"
+        onMouseDown={handleResizeStart('ne')}
+      />
+      <div
+        className="resize-handle resize-handle-sw"
+        onMouseDown={handleResizeStart('sw')}
+      />
+      <div
+        className="resize-handle resize-handle-se"
+        onMouseDown={handleResizeStart('se')}
+      />
+
+      {/* Edges */}
+      <div
+        className="resize-handle resize-handle-n"
+        onMouseDown={handleResizeStart('n')}
+      />
+      <div
+        className="resize-handle resize-handle-s"
+        onMouseDown={handleResizeStart('s')}
+      />
+      <div
+        className="resize-handle resize-handle-e"
+        onMouseDown={handleResizeStart('e')}
+      />
+      <div
+        className="resize-handle resize-handle-w"
+        onMouseDown={handleResizeStart('w')}
+      />
     </div>
   )
 }
