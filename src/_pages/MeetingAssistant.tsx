@@ -624,6 +624,10 @@ const lastRealtimeTextRef = useRef("")
           }
           return "ready"
         })
+      } else if (status === "recorder_ready") {
+        // When recorder is ready (especially when reusing pre-initialized recorder), always set to ready
+        // This ensures status becomes "ready" regardless of message ordering or previous state
+        setRecorderStatus("ready")
       } else if (status === "recording_started" || status === "initializing" || status === "initializing_recorder") {
         setRecorderStatus(prev => (prev === "ready" ? prev : "initializing"))
       } else if (status === "recording_stopped" || status === "stopped") {
@@ -653,7 +657,17 @@ const lastRealtimeTextRef = useRef("")
       const result = await window.electronAPI.startRealTimeTranscription()
       if (result.success) {
         setIsRecording(true)
-        setRecorderStatus("initializing")
+        // Only set to "initializing" if not already "ready"
+        // This prevents overriding "ready" status when reusing pre-initialized recorder
+        setRecorderStatus(prev => {
+          if (prev === "ready") {
+            // Already ready (from immediate recorder_ready message), keep it
+            return "ready"
+          }
+          // Only show toast if we're actually initializing
+          showToast("Preparing Recorder", "Hold on while we get everything ready...", "neutral")
+          return "initializing"
+        })
         setTranscript("")
         setSuggestions([])
         transcriptRef.current = ""

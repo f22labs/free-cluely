@@ -307,11 +307,23 @@ class RealtimeSTTService:
     
     def start_recording(self):
         """Start recording and transcription"""
+        self._debug(f"[start_recording()] Called - is_recording: {self.is_recording}, recorder exists: {self.recorder is not None}, _preserve_recorder: {self._preserve_recorder}")
         if self.is_recording:
+            self._debug("[start_recording()] Already recording, returning early")
             return
         
         self.is_recording = True
-        self._send_message({"type": "status", "status": "recording_started", "timestamp": self._get_timestamp()})
+        self._debug("[start_recording()] Set is_recording = True")
+        
+        # When reusing a pre-initialized recorder, don't send "recording_started" 
+        # because the recorder is already ready. The "recorder_ready" message from run() 
+        # will indicate the recorder is ready, avoiding the "preparing recorder" status.
+        if self._preserve_recorder and self.recorder is not None:
+            self._debug("[start_recording()] Skipping 'recording_started' message - recorder is pre-initialized and ready")
+        else:
+            # Only send "recording_started" when initializing a new recorder
+            self._send_message({"type": "status", "status": "recording_started", "timestamp": self._get_timestamp()})
+            self._debug("[start_recording()] Sent recording_started status")
     
     def stop_recording(self):
         """Stop recording and finalize transcript file"""
@@ -320,16 +332,32 @@ class RealtimeSTTService:
         
         self.is_recording = False
         
+        # Debug: Log preserve state
+        self._debug(f"[stop_recording()] recorder exists: {self.recorder is not None}, _preserve_recorder: {self._preserve_recorder}")
+        
         # Close recorder if it exists, but preserve it in pre-init mode
-        if self.recorder and not self._preserve_recorder:
-            try:
-                # AudioToTextRecorder is a context manager - try to close it properly
-                if hasattr(self.recorder, '__exit__'):
-                    self.recorder.__exit__(None, None, None)
-            except Exception as e:
-                self._send_error(f"Error closing recorder: {str(e)}")
-            finally:
-                self.recorder = None
+        # Defensive check: Only destroy if explicitly not in preserve mode
+        if self.recorder:
+            if self._preserve_recorder:
+                # Preserve mode: Keep the recorder for reuse
+                self._debug("[stop_recording()] Preserving recorder (pre-init mode)")
+                # Do NOT set self.recorder = None
+                # Validate that recorder is still set after preserving
+                if self.recorder is None:
+                    self._warn("[stop_recording()] ERROR: Recorder became None in preserve mode - this should not happen!")
+                else:
+                    self._debug(f"[stop_recording()] Recorder successfully preserved: {self.recorder is not None}")
+            else:
+                # Normal mode: Destroy the recorder
+                self._debug("[stop_recording()] Destroying recorder (not in preserve mode)")
+                try:
+                    # AudioToTextRecorder is a context manager - try to close it properly
+                    if hasattr(self.recorder, '__exit__'):
+                        self.recorder.__exit__(None, None, None)
+                except Exception as e:
+                    self._send_error(f"Error closing recorder: {str(e)}")
+                finally:
+                    self.recorder = None
         
         # Finalize transcript file
         if self.transcript_file_path:
@@ -348,8 +376,10 @@ class RealtimeSTTService:
     
     def initialize_recorder(self):
         """Initialize the AudioToTextRecorder if not already initialized"""
+        self._debug(f"[initialize_recorder()] Called - recorder exists: {self.recorder is not None}, _preserve_recorder: {self._preserve_recorder}")
         if self.recorder is not None:
             # Already initialized
+            self._debug("[initialize_recorder()] Recorder already exists, returning early")
             self._send_message({"type": "status", "status": "recorder_ready", "timestamp": self._get_timestamp()})
             return
         
@@ -501,9 +531,24 @@ class RealtimeSTTService:
 
     def run(self):
         """Main run loop - continuously transcribe audio"""
+        # Debug: Log recorder state when run() is called
+        self._debug(f"[run()] Called - recorder exists: {self.recorder is not None}, _preserve_recorder: {self._preserve_recorder}")
+        
         # Initialize recorder if not already initialized
+        # Only initialize if recorder is None AND we're not in preserve mode (or if in preserve mode but recorder should exist)
         if self.recorder is None:
+            if self._preserve_recorder:
+                # In preserve mode, recorder should not be None - this is an error condition
+                self._warn("[run()] ERROR: Recorder is None but _preserve_recorder is True - this should not happen!")
+                self._debug("[run()] Attempting to initialize recorder anyway...")
+            self._debug("[run()] Recorder is None, calling initialize_recorder()")
             self.initialize_recorder()
+        else:
+            self._debug("[run()] Recorder already exists, skipping initialization")
+            # If recorder already exists, send "recorder_ready" status immediately
+            # (skip "initializing_recorder" since we didn't initialize)
+            self._send_message({"type": "status", "status": "recorder_ready", "timestamp": self._get_timestamp()})
+            self._debug("[run()] Sent recorder_ready status for existing recorder")
         
         # Use stored callback or define it if not pre-initialized
         if hasattr(self, '_on_realtime_update'):
@@ -772,12 +817,19 @@ class RealtimeSTTService:
         #         self._warn(f"[PLATFORM] Could not verify microphone after recorder creation: {verify_error}")
         
         # Start recording if not already started
+        # Note: In pre-init mode, start_recording() is called by stdin_listener before run() is called
+        # So we only call it here if it wasn't already called
         if not self.is_recording:
+            self._debug("[run()] Starting recording (is_recording was False)")
             self.start_recording()
+        else:
+            self._debug("[run()] Recording already active (is_recording was True)")
         
+        # Send "ready" status to indicate transcription loop is active
+        # This comes after "recorder_ready" which was sent earlier (line 550)
         self._send_message({"type": "status", "status": "ready", "timestamp": self._get_timestamp()})
-        self._debug("Recorder started; transcription loop active")
-        self._debug("Callbacks will fire when speech is detected")
+        self._debug("[run()] Sent 'ready' status - transcription loop active")
+        self._debug("[run()] Callbacks will fire when speech is detected")
         
         # Listen continuously
         import threading
@@ -983,6 +1035,12 @@ class RealtimeSTTService:
             sys.exit(1)
         finally:
             self.stop_recording()
+            # Verify recorder state after stop_recording() if in preserve mode
+            if self._preserve_recorder:
+                if self.recorder is None:
+                    self._warn("[run()] ERROR: Recorder is None after stop_recording() but _preserve_recorder is True!")
+                else:
+                    self._debug(f"[run()] Recorder preserved after stop: {self.recorder is not None}")
     
     def _preprocess_text(self, text):
         """Clean and preprocess text"""
@@ -1029,7 +1087,10 @@ def main():
             if args.pre_init:
                 # Pre-initialize recorder but don't start recording yet
                 service._preserve_recorder = True  # Preserve recorder for multiple start/stop cycles
+                service._debug(f"[main()] Pre-init mode enabled - Set _preserve_recorder = True")
+                service._debug(f"[main()] Initializing recorder before run() is called")
                 service.initialize_recorder()
+                service._debug(f"[main()] Recorder initialized - recorder exists: {service.recorder is not None}")
                 # Wait for start command on stdin
                 import threading
                 import queue
@@ -1046,19 +1107,30 @@ def main():
                                 break
                             try:
                                 command = json.loads(line.strip())
-                                if command.get("action") == "start":
+                                action = command.get("action")
+                                service._debug(f"[stdin_listener] Received command: {action}")
+                                
+                                if action == "start":
                                     # Check if already running
                                     if run_thread and run_thread.is_alive():
-                                        service._debug("Recording already in progress, ignoring start command")
+                                        service._debug("[stdin_listener] Recording already in progress, ignoring start command")
                                         continue
                                     
+                                    service._debug(f"[stdin_listener] Starting recording - recorder exists: {service.recorder is not None}, _preserve_recorder: {service._preserve_recorder}")
+                                    
+                                    # If recorder is pre-initialized and ready, send "recorder_ready" IMMEDIATELY
+                                    # This ensures the UI status updates as quickly as possible, before any other processing
+                                    if service._preserve_recorder and service.recorder is not None:
+                                        service._debug("[stdin_listener] Recorder is pre-initialized, sending recorder_ready immediately")
+                                        service._send_message({"type": "status", "status": "recorder_ready", "timestamp": service._get_timestamp()})
+                                    
                                     service.start_recording()
-                                    # Send "ready" status after starting recording
-                                    service._send_message({"type": "status", "status": "ready", "timestamp": service._get_timestamp()})
+                                    # Don't send "ready" status here - let run() handle all status messages in correct sequence
                                     
                                     # Run in a separate thread so we can handle multiple cycles
                                     def run_transcription():
                                         try:
+                                            service._debug("[run_transcription] Thread started, calling service.run()")
                                             service.run()
                                         except Exception as e:
                                             service._send_error(f"Error in transcription loop: {e}")
@@ -1066,12 +1138,14 @@ def main():
                                             # Reset run_thread when transcription loop exits
                                             nonlocal run_thread
                                             run_thread = None
-                                            service._debug("Transcription loop exited, ready for next start")
+                                            service._debug("[run_transcription] Transcription loop exited, ready for next start")
                                     
                                     run_thread = threading.Thread(target=run_transcription, daemon=True)
                                     run_thread.start()
+                                    service._debug(f"[stdin_listener] Started run_transcription thread")
                                     
-                                elif command.get("action") == "stop":
+                                elif action == "stop":
+                                    service._debug("[stdin_listener] Received stop command, putting in queue")
                                     # Put stop command in queue for run() to handle
                                     stop_queue.put("stop")
                             except (json.JSONDecodeError, ValueError):
