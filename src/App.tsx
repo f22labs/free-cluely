@@ -98,6 +98,9 @@ const App: React.FC = () => {
 
     const updateHeight = () => {
       if (!containerRef.current) return
+      // Skip content-driven sizing for Meeting Assistant - it uses window-driven sizing
+      if (view === "meeting") return
+      
       const height = containerRef.current.scrollHeight
       const width = containerRef.current.scrollWidth
       window.electronAPI?.updateContentDimensions({ width, height })
@@ -167,7 +170,7 @@ const App: React.FC = () => {
   }, [])
 
   return (
-    <div ref={containerRef} className="min-h-0">
+    <div ref={containerRef} className="w-full h-full min-h-0">
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
           {view === "queue" ? (

@@ -151,7 +151,7 @@ const QueueCommands: React.FC<QueueCommandsProps> = ({
   // Remove handleChatSend function
 
   return (
-    <div className="w-fit">
+    <div className="w-screen">
       <div className="text-xs text-white/90 liquid-glass-bar py-1 px-4 flex items-center justify-center gap-4 draggable-area">
         {/* Show/Hide */}
         <div className="flex items-center gap-2">
