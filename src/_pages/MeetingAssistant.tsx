@@ -45,6 +45,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const [isResizing, setIsResizing] = useState(false)
   const [resizeDirection, setResizeDirection] = useState<"n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se" | null>(null)
   const resizeStartRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
+  const [windowSize, setWindowSize] = useState({ width: window.innerWidth, height: window.innerHeight })
   
   const transcriptRef = useRef<string>("")
   const suggestionTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -783,26 +784,29 @@ const lastRealtimeTextRef = useRef("")
     }
   }, [isResizing, resizeDirection])
 
-  // Update dimensions
+  // Listen to window resize events to automatically adjust content
   useEffect(() => {
-    const updateDimensions = () => {
-      if (contentRef.current && !isResizing) {
-        const height = contentRef.current.scrollHeight
-        const width = contentRef.current.scrollWidth
-        window.electronAPI.updateContentDimensions({ width, height })
+    const handleWindowResize = () => {
+      const newSize = {
+        width: window.innerWidth,
+        height: window.innerHeight
       }
+      setWindowSize(newSize)
+      console.log('[RESIZE] Window resized to:', newSize.width, 'x', newSize.height)
     }
 
-    const resizeObserver = new ResizeObserver(updateDimensions)
-    if (contentRef.current) {
-      resizeObserver.observe(contentRef.current)
-    }
-    updateDimensions()
+    window.addEventListener('resize', handleWindowResize)
+    
+    // Set initial size
+    handleWindowResize()
 
     return () => {
-      resizeObserver.disconnect()
+      window.removeEventListener('resize', handleWindowResize)
     }
-  }, [suggestions, transcript, isSettingsOpen, isResizing])
+  }, [])
+
+  // Disable content-driven sizing for MeetingAssistant (uses window-driven sizing)
+  // Removed updateContentDimensions call that was conflicting with resize handles
 
   return (
     <div
@@ -813,7 +817,9 @@ const lastRealtimeTextRef = useRef("")
         backdropFilter: 'blur(20px)',
         WebkitBackdropFilter: 'blur(20px)',
         position: 'relative',
-        zIndex: 10
+        zIndex: 10,
+        width: windowSize.width,
+        height: windowSize.height
       }}
     >
       <div className="w-full h-full flex flex-col overflow-hidden">
