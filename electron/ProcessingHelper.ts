@@ -52,6 +52,7 @@ export class ProcessingHelper {
     startTime: number
   } | null = null
   private realtimeSTTProcess: ChildProcess | null = null
+  private isPreInitialized: boolean = false  // Track if process was pre-initialized
   private lastTranscriptionMetrics: TranscriptionMetricsSnapshot | null = null
   private preInitResolve: ((value: void | PromiseLike<void>) => void) | null = null;
   private preInitReject: ((reason?: any) => void) | null = null;
@@ -371,32 +372,78 @@ export class ProcessingHelper {
    */
   public async startRealTimeTranscription(filename?: string): Promise<string> {
     try {
-      // If recorder is already pre-initialized, just send start command
-      if (this.realtimeSTTProcess && this.realtimeSTTProcess.stdin && this.realTimeTranscriptSession) {
-        // Update transcript file path if new filename provided
-        if (filename) {
-          const transcriptsDir = TRANSCRIPTS_DIR;
-          const filePath = path.join(transcriptsDir, filename);
-          this.realTimeTranscriptSession = {
-            filePath,
-            filename: filename,
-            startTime: Date.now()
-          };
+      // If recorder is already pre-initialized, reuse it (even if session was cleared)
+      // Strengthen the check: verify process exists, is pre-initialized, and stdin is writable
+      const canReuseProcess = 
+        this.realtimeSTTProcess !== null &&
+        this.isPreInitialized === true &&
+        this.realtimeSTTProcess.stdin !== null &&
+        !this.realtimeSTTProcess.stdin.destroyed &&
+        !this.realtimeSTTProcess.killed;
+      
+      if (canReuseProcess) {
+        logger.info("[ProcessingHelper] Process reuse check passed - reusing pre-initialized recorder", {
+          processExists: this.realtimeSTTProcess !== null,
+          isPreInitialized: this.isPreInitialized,
+          stdinExists: this.realtimeSTTProcess.stdin !== null,
+          stdinDestroyed: this.realtimeSTTProcess.stdin?.destroyed ?? true,
+          processKilled: this.realtimeSTTProcess.killed
+        });
+        
+        // Update or create session
+        const transcriptsDir = TRANSCRIPTS_DIR;
+        if (!fs.existsSync(transcriptsDir)) {
+          fs.mkdirSync(transcriptsDir, { recursive: true });
+        }
+        
+        const transcriptFilename = filename || `transcript_${Date.now()}.txt`;
+        const filePath = path.join(transcriptsDir, transcriptFilename);
+        
+        // Create new session for this recording
+        this.realTimeTranscriptSession = {
+          filePath,
+          filename: transcriptFilename,
+          startTime: Date.now()
+        };
+        
+        // Send "recorder_ready" status IMMEDIATELY to UI before sending start command
+        // This ensures the UI status updates instantly, avoiding "preparing recorder" message
+        const mainWindow = this.appState.getMainWindow();
+        if (mainWindow) {
+          mainWindow.webContents.send("realtime-transcription-status", {
+            status: "recorder_ready",
+            timestamp: Date.now()
+          });
+          logger.info("[ProcessingHelper] Sent immediate recorder_ready status to UI (pre-initialized recorder)");
         }
         
         // Send start command to pre-initialized process
-        this.realtimeSTTProcess.stdin.write(JSON.stringify({ action: "start" }) + "\n");
-        logger.info("[ProcessingHelper] Sent start command to pre-initialized recorder");
-        return this.realTimeTranscriptSession.filePath;
+        try {
+          this.realtimeSTTProcess.stdin.write(JSON.stringify({ action: "start" }) + "\n");
+          logger.info("[ProcessingHelper] Successfully sent start command to pre-initialized recorder");
+          return filePath;
+        } catch (error) {
+          logger.error("[ProcessingHelper] Failed to write to stdin, will spawn new process", error);
+          // Fall through to spawn new process
+        }
+      } else {
+        logger.info("[ProcessingHelper] Process reuse check failed - will spawn new process", {
+          processExists: this.realtimeSTTProcess !== null,
+          isPreInitialized: this.isPreInitialized,
+          stdinExists: this.realtimeSTTProcess?.stdin !== null,
+          stdinDestroyed: this.realtimeSTTProcess?.stdin?.destroyed ?? true,
+          processKilled: this.realtimeSTTProcess?.killed ?? true
+        });
       }
 
-      // Stop any existing process (only if there's a session)
-      if (this.realtimeSTTProcess && this.realTimeTranscriptSession) {
+      // Stop any existing process (only if there's a session and it's not pre-initialized)
+      if (this.realtimeSTTProcess && this.realTimeTranscriptSession && !this.isPreInitialized) {
         await this.stopRealTimeTranscription();
-      } else if (this.realtimeSTTProcess) {
-        // Process exists but no session - kill it
+      } else if (this.realtimeSTTProcess && !this.isPreInitialized) {
+        // Process exists but no session and not pre-initialized - kill it
         this.realtimeSTTProcess.kill();
         this.realtimeSTTProcess = null;
+        this.isPreInitialized = false;
       }
 
       // Use project root transcripts directory for easy access
@@ -805,25 +852,45 @@ export class ProcessingHelper {
       
       // Stop Python process if running
       if (this.realtimeSTTProcess) {
-        try {
-          // Send stop command
-          this.realtimeSTTProcess.stdin?.write(JSON.stringify({ action: "stop" }) + "\n");
-          this.realtimeSTTProcess.stdin?.end();
-          
-          // Give it a moment to finalize, then kill if still running
-          setTimeout(() => {
-            if (this.realtimeSTTProcess && !this.realtimeSTTProcess.killed) {
+        logger.info("[ProcessingHelper] stopRealTimeTranscription() - process exists", {
+          isPreInitialized: this.isPreInitialized,
+          stdinExists: this.realtimeSTTProcess.stdin !== null,
+          stdinDestroyed: this.realtimeSTTProcess.stdin?.destroyed ?? true,
+          processKilled: this.realtimeSTTProcess.killed
+        });
+        
+        if (this.isPreInitialized) {
+          // Pre-initialized process: send stop command but keep process alive
+          try {
+            this.realtimeSTTProcess.stdin?.write(JSON.stringify({ action: "stop" }) + "\n");
+            logger.info("[ProcessingHelper] Sent stop command to pre-initialized recorder (keeping process alive)");
+          } catch (err) {
+            logger.error("[ProcessingHelper] Error sending stop to pre-initialized process:", err);
+          }
+          // DON'T kill the process or set it to null - keep it for reuse
+        } else {
+          // Normal process: kill it
+          try {
+            // Send stop command
+            this.realtimeSTTProcess.stdin?.write(JSON.stringify({ action: "stop" }) + "\n");
+            this.realtimeSTTProcess.stdin?.end();
+            
+            // Give it a moment to finalize, then kill if still running
+            setTimeout(() => {
+              if (this.realtimeSTTProcess && !this.realtimeSTTProcess.killed) {
+                this.realtimeSTTProcess.kill();
+              }
+            }, 2000);
+          } catch (err) {
+            logger.error("[ProcessingHelper] Error stopping Python process:", err);
+            if (this.realtimeSTTProcess) {
               this.realtimeSTTProcess.kill();
             }
-          }, 2000);
-        } catch (err) {
-          logger.error("[ProcessingHelper] Error stopping Python process:", err);
-          if (this.realtimeSTTProcess) {
-            this.realtimeSTTProcess.kill();
           }
+          
+          this.realtimeSTTProcess = null;
+          this.isPreInitialized = false;
         }
-        
-        this.realtimeSTTProcess = null;
       }
       
       const duration = Date.now() - this.realTimeTranscriptSession.startTime;
@@ -896,6 +963,7 @@ export class ProcessingHelper {
         // Process exists but no session - just kill it
         this.realtimeSTTProcess.kill();
         this.realtimeSTTProcess = null;
+        this.isPreInitialized = false;  // Reset flag
       }
 
       const transcriptsDir = TRANSCRIPTS_DIR;
@@ -929,6 +997,7 @@ export class ProcessingHelper {
       });
 
       this.realtimeSTTProcess = pythonProcess;
+      this.isPreInitialized = true;  // Mark as pre-initialized
 
       // Handle stdout/stderr (same as existing code)
       let stdoutBuffer = "";
@@ -995,12 +1064,10 @@ export class ProcessingHelper {
       // Handle process exit
       pythonProcess.on("exit", (code) => {
         logger.info("[RealtimeSTT] Process exited with code", code);
-        if (code !== 0 && this.preInitReject) {
-          this.preInitReject(new Error(`Process exited with code ${code}`));
-          this.preInitReject = null;
-          this.preInitResolve = null;
+        if (this.realtimeSTTProcess === pythonProcess) {
+          this.realtimeSTTProcess = null;
+          this.isPreInitialized = false;  // Reset flag
         }
-        this.realtimeSTTProcess = null;
       });
       
       pythonProcess.on("error", (error) => {
