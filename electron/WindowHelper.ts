@@ -352,4 +352,33 @@ export class WindowHelper {
       Math.round(this.currentY)
     )
   }
+
+  public resizeWindow(width: number, height: number): void {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      logger.warn("Main window does not exist or is destroyed.")
+      return
+    }
+
+    // Enforce minimum size constraints
+    const minWidth = 300
+    const minHeight = 200
+    const newWidth = Math.max(width, minWidth)
+    const newHeight = Math.max(height, minHeight)
+
+    // Get current position
+    const [currentX, currentY] = this.mainWindow.getPosition()
+
+    // Update window bounds
+    this.mainWindow.setBounds({
+      x: currentX,
+      y: currentY,
+      width: newWidth,
+      height: newHeight
+    })
+
+    // Update internal state
+    this.windowSize = { width: newWidth, height: newHeight }
+
+    logger.info(`Window resized to ${newWidth}x${newHeight}`)
+  }
 }

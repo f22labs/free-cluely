@@ -48,6 +48,8 @@ declare global {
       moveWindowRight: () => Promise<void>
       moveWindowUp: () => Promise<void>
       moveWindowDown: () => Promise<void>
+      resizeWindow: (width: number, height: number) => Promise<void>
+      centerAndShowWindow: () => Promise<void>
       quitApp: () => Promise<void>
       
       // LLM Model Management

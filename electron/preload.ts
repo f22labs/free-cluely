@@ -41,6 +41,8 @@ interface ElectronAPI {
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
   minimizeWindow: () => Promise<void>
+  resizeWindow: (width: number, height: number) => Promise<void>
+  centerAndShowWindow: () => Promise<void>
   analyzeAudioFromBase64: (data: string, mimeType: string) => Promise<{ text: string; timestamp: number }>
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   analyzeImageFile: (path: string) => Promise<void>
@@ -69,6 +71,8 @@ interface ElectronAPI {
   generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation"; metrics?: MeetingSuggestionMetrics }>
   
   invoke: (channel: string, ...args: any[]) => Promise<any>
+  // Add to ElectronAPI interface
+  logToTerminal: (level: "info" | "warn" | "error" | "debug", ...args: any[]) => Promise<void>
 }
 
 export const PROCESSING_EVENTS = {
@@ -230,6 +234,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   moveWindowUp: () => ipcRenderer.invoke("move-window-up"),
   moveWindowDown: () => ipcRenderer.invoke("move-window-down"),
   minimizeWindow: () => ipcRenderer.invoke("minimize-window"),
+  resizeWindow: (width: number, height: number) => ipcRenderer.invoke("resize-window", width, height),
+  centerAndShowWindow: () => ipcRenderer.invoke("center-and-show-window"),
   analyzeAudioFromBase64: (data: string, mimeType: string) => ipcRenderer.invoke("analyze-audio-base64", data, mimeType),
   analyzeAudioFile: (path: string) => ipcRenderer.invoke("analyze-audio-file", path),
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
@@ -266,5 +272,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   generateMeetingSuggestion: (transcript: string, systemPrompt: string) => 
     ipcRenderer.invoke("generate-meeting-suggestion", transcript, systemPrompt),
   
-  invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args)
+  invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
+  logToTerminal: (level: "info" | "warn" | "error" | "debug", ...args: any[]) => {
+    // Pass all args as individual arguments
+    return ipcRenderer.invoke("renderer-log", level, ...args).catch((err) => {
+      console.error("[Preload] Failed to log to terminal:", err)
+    })
+  },
 } as ElectronAPI)

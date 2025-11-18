@@ -53,6 +53,8 @@ export class ProcessingHelper {
   } | null = null
   private realtimeSTTProcess: ChildProcess | null = null
   private lastTranscriptionMetrics: TranscriptionMetricsSnapshot | null = null
+  private preInitResolve: ((value: void | PromiseLike<void>) => void) | null = null;
+  private preInitReject: ((reason?: any) => void) | null = null;
 
   constructor(appState: AppState) {
     this.appState = appState
@@ -369,9 +371,32 @@ export class ProcessingHelper {
    */
   public async startRealTimeTranscription(filename?: string): Promise<string> {
     try {
-      // Stop any existing process
-      if (this.realtimeSTTProcess) {
+      // If recorder is already pre-initialized, just send start command
+      if (this.realtimeSTTProcess && this.realtimeSTTProcess.stdin && this.realTimeTranscriptSession) {
+        // Update transcript file path if new filename provided
+        if (filename) {
+          const transcriptsDir = TRANSCRIPTS_DIR;
+          const filePath = path.join(transcriptsDir, filename);
+          this.realTimeTranscriptSession = {
+            filePath,
+            filename: filename,
+            startTime: Date.now()
+          };
+        }
+        
+        // Send start command to pre-initialized process
+        this.realtimeSTTProcess.stdin.write(JSON.stringify({ action: "start" }) + "\n");
+        logger.info("[ProcessingHelper] Sent start command to pre-initialized recorder");
+        return this.realTimeTranscriptSession.filePath;
+      }
+
+      // Stop any existing process (only if there's a session)
+      if (this.realtimeSTTProcess && this.realTimeTranscriptSession) {
         await this.stopRealTimeTranscription();
+      } else if (this.realtimeSTTProcess) {
+        // Process exists but no session - kill it
+        this.realtimeSTTProcess.kill();
+        this.realtimeSTTProcess = null;
       }
 
       // Use project root transcripts directory for easy access
@@ -498,6 +523,25 @@ export class ProcessingHelper {
    */
   private handleRealtimeSTTMessage(message: any): void {
     const mainWindow = this.appState.getMainWindow();
+    
+    // Check for recorder_ready status (for pre-initialization)
+    if (message.type === "status" && message.status === "recorder_ready") {
+      if (this.preInitResolve) {
+        logger.info("[ProcessingHelper] Recorder pre-initialized successfully");
+        this.preInitResolve();
+        this.preInitResolve = null;
+        this.preInitReject = null;
+      }
+      // Forward to frontend even if window might not be ready yet
+      if (mainWindow) {
+        mainWindow.webContents.send("realtime-transcription-status", {
+          status: message.status ?? "",
+          timestamp: Date.now()
+        });
+      }
+      return; // Don't process again in switch statement
+    }
+
     if (!mainWindow) return;
 
     switch (message.type) {
@@ -832,5 +876,170 @@ export class ProcessingHelper {
    */
   public isRealTimeTranscriptionActive(): boolean {
     return this.realTimeTranscriptSession !== null;
+  }
+
+  // Add a method to pre-initialize the recorder
+  public async preInitializeRecorder(): Promise<void> {
+    try {
+      // Stop any existing process only if there's an active session
+      if (this.realtimeSTTProcess && this.realTimeTranscriptSession) {
+        try {
+          await this.stopRealTimeTranscription();
+        } catch (error) {
+          // If stopping fails, just kill the process
+          if (this.realtimeSTTProcess) {
+            this.realtimeSTTProcess.kill();
+            this.realtimeSTTProcess = null;
+          }
+        }
+      } else if (this.realtimeSTTProcess) {
+        // Process exists but no session - just kill it
+        this.realtimeSTTProcess.kill();
+        this.realtimeSTTProcess = null;
+      }
+
+      const transcriptsDir = TRANSCRIPTS_DIR;
+      if (!fs.existsSync(transcriptsDir)) {
+        fs.mkdirSync(transcriptsDir, { recursive: true });
+      }
+
+      const transcriptFilename = `transcript_${Date.now()}.txt`;
+      const filePath = path.join(transcriptsDir, transcriptFilename);
+
+      // Set up a temporary session for pre-initialization
+      this.realTimeTranscriptSession = {
+        filePath,
+        filename: transcriptFilename,
+        startTime: Date.now()
+      };
+
+      const pythonScriptPath = path.join(__dirname, "..", "realtime_stt_service.py");
+
+      // Spawn Python process with --pre-init flag
+      const pythonProcess = spawn("python3", [
+        pythonScriptPath,
+        "--transcript-file", filePath,
+        "--model", "large-v3",
+        "--realtime-model", "base.en",
+        "--language", "en",
+        "--pre-init"
+      ], {
+        stdio: ["pipe", "pipe", "pipe"],
+        cwd: path.join(__dirname, "..")
+      });
+
+      this.realtimeSTTProcess = pythonProcess;
+
+      // Handle stdout/stderr (same as existing code)
+      let stdoutBuffer = "";
+      pythonProcess.stdout?.on("data", (data: Buffer) => {
+        stdoutBuffer += data.toString();
+        const lines = stdoutBuffer.split("\n");
+        stdoutBuffer = lines.pop() || ""; // Keep incomplete line
+        
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const message = JSON.parse(line);
+              this.handleRealtimeSTTMessage(message);
+            } catch (e) {
+              // Ignore non-JSON lines
+            }
+          }
+        }
+      });
+      
+      // Handle stderr (errors/logs/debug output)
+      let stderrBuffer = "";
+      pythonProcess.stderr?.on("data", (data: Buffer) => {
+        stderrBuffer += data.toString();
+        const lines = stderrBuffer.split("\n");
+        stderrBuffer = lines.pop() || ""; // Keep incomplete line
+        
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              // Try to parse as JSON first
+              const message = JSON.parse(line);
+              if (message.type === "error") {
+                logger.error("[RealtimeSTT] Error:", message.error);
+              } else if (message.type === "status") {
+                logger.info("[RealtimeSTT] Status:", message.status);
+                // Also handle status messages for pre-init
+                this.handleRealtimeSTTMessage(message);
+              } else if (message.type === "log") {
+                const level = (message.level || "debug") as string;
+                const payload = message.message ?? "";
+                switch (level) {
+                  case "info":
+                    logger.info("[RealtimeSTT]", payload);
+                    break;
+                  case "warn":
+                    logger.warn("[RealtimeSTT]", payload);
+                    break;
+                  case "error":
+                    logger.error("[RealtimeSTT]", payload);
+                    break;
+                  default:
+                    logger.debug("[RealtimeSTT]", payload);
+                }
+              }
+            } catch (e) {
+              // Not JSON - print all stderr output (includes debug messages)
+              logger.debug("[RealtimeSTT DEBUG]", line);
+            }
+          }
+        }
+      });
+      
+      // Handle process exit
+      pythonProcess.on("exit", (code) => {
+        logger.info("[RealtimeSTT] Process exited with code", code);
+        if (code !== 0 && this.preInitReject) {
+          this.preInitReject(new Error(`Process exited with code ${code}`));
+          this.preInitReject = null;
+          this.preInitResolve = null;
+        }
+        this.realtimeSTTProcess = null;
+      });
+      
+      pythonProcess.on("error", (error) => {
+        logger.error("[RealtimeSTT] Process error:", error);
+        if (this.preInitReject) {
+          this.preInitReject(error);
+          this.preInitReject = null;
+          this.preInitResolve = null;
+        }
+        this.realtimeSTTProcess = null;
+      });
+      
+      this.lastTranscriptionMetrics = null;
+      
+      logger.info("[ProcessingHelper] Pre-initializing recorder...");
+      
+      // Wait for "recorder_ready" status
+      return new Promise((resolve, reject) => {
+        this.preInitResolve = resolve;
+        this.preInitReject = reject;
+        
+        const timeout = setTimeout(() => {
+          if (this.preInitReject === reject) {
+            this.preInitReject = null;
+            this.preInitResolve = null;
+            reject(new Error("Recorder initialization timeout"));
+          }
+        }, 60000); // 60 second timeout (initialization can take ~8-10 seconds)
+        
+        // Store timeout so we can clear it if successful
+        const originalResolve = resolve;
+        this.preInitResolve = () => {
+          clearTimeout(timeout);
+          originalResolve();
+        };
+      });
+    } catch (error) {
+      logger.error("[ProcessingHelper] Failed to pre-initialize recorder:", error);
+      throw error;
+    }
   }
 }

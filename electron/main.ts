@@ -56,6 +56,12 @@ export class AppState {
     // Initialize ProcessingHelper
     this.processingHelper = new ProcessingHelper(this)
 
+    // Pre-initialize recorder immediately after ProcessingHelper is created
+    // This happens when transcripts directory and Gemini are being initialized
+    this.processingHelper.preInitializeRecorder().catch((error) => {
+      logger.warn("[AppState] Failed to pre-initialize recorder (will initialize on demand):", error)
+    })
+
     // Initialize ShortcutsHelper
     this.shortcutsHelper = new ShortcutsHelper(this)
   }
@@ -187,6 +193,10 @@ export class AppState {
     this.windowHelper.centerAndShowWindow()
   }
 
+  public resizeWindow(width: number, height: number): void {
+    this.windowHelper.resizeWindow(width, height)
+  }
+
   public createTray(): void {
     // Create a simple tray icon
     const image = nativeImage.createEmpty()
@@ -283,8 +293,10 @@ async function initializeApp() {
     logger.info("App is ready")
     appState.createWindow()
     appState.createTray()
-    // Register global shortcuts using ShortcutsHelper
     appState.shortcutsHelper.registerGlobalShortcuts()
+    
+    // Pre-initialization is already started in AppState constructor
+    // No need to call it again here
   })
 
   app.on("activate", () => {
