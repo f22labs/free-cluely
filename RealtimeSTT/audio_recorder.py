@@ -85,7 +85,7 @@ TIME_SLEEP = 0.02
 SAMPLE_RATE = 16000
 BUFFER_SIZE = 512
 INT16_MAX_ABS_VALUE = 32768.0
-LOG_FILE_PATH = "/Users/f22labs/Documents/real_time_transcription/free-cluely/realtimesst.log"
+LOG_FILE_PATH = "realtimesst.log"
 
 
 def _ensure_file_handler():
