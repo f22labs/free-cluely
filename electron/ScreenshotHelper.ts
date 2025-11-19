@@ -5,6 +5,7 @@ import fs from "node:fs"
 import { app } from "electron"
 import { v4 as uuidv4 } from "uuid"
 import screenshot from "screenshot-desktop"
+import { logger } from "./logger"
 
 export class ScreenshotHelper {
   private screenshotQueue: string[] = []
@@ -56,7 +57,7 @@ export class ScreenshotHelper {
     this.screenshotQueue.forEach((screenshotPath) => {
       fs.unlink(screenshotPath, (err) => {
         if (err)
-          console.error(`Error deleting screenshot at ${screenshotPath}:`, err)
+          logger.error(`Error deleting screenshot at ${screenshotPath}:`, err)
       })
     })
     this.screenshotQueue = []
@@ -65,7 +66,7 @@ export class ScreenshotHelper {
     this.extraScreenshotQueue.forEach((screenshotPath) => {
       fs.unlink(screenshotPath, (err) => {
         if (err)
-          console.error(
+          logger.error(
             `Error deleting extra screenshot at ${screenshotPath}:`,
             err
           )
@@ -97,7 +98,7 @@ export class ScreenshotHelper {
             try {
               await fs.promises.unlink(removedPath)
             } catch (error) {
-              console.error("Error removing old screenshot:", error)
+              logger.error("Error removing old screenshot:", error)
             }
           }
         }
@@ -112,7 +113,7 @@ export class ScreenshotHelper {
             try {
               await fs.promises.unlink(removedPath)
             } catch (error) {
-              console.error("Error removing old screenshot:", error)
+              logger.error("Error removing old screenshot:", error)
             }
           }
         }
@@ -120,8 +121,9 @@ export class ScreenshotHelper {
 
       return screenshotPath
     } catch (error) {
-      console.error("Error taking screenshot:", error)
-      throw new Error(`Failed to take screenshot: ${error.message}`)
+      logger.error("Error taking screenshot:", error)
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to take screenshot: ${message}`)
     } finally {
       // Ensure window is always shown again
       showMainWindow()
@@ -133,8 +135,8 @@ export class ScreenshotHelper {
       const data = await fs.promises.readFile(filepath)
       return `data:image/png;base64,${data.toString("base64")}`
     } catch (error) {
-      console.error("Error reading image:", error)
-      throw error
+      logger.error("Error reading image:", error)
+      throw error instanceof Error ? error : new Error(String(error))
     }
   }
 
@@ -154,8 +156,9 @@ export class ScreenshotHelper {
       }
       return { success: true }
     } catch (error) {
-      console.error("Error deleting file:", error)
-      return { success: false, error: error.message }
+      logger.error("Error deleting file:", error)
+      const message = error instanceof Error ? error.message : String(error)
+      return { success: false, error: message }
     }
   }
 }

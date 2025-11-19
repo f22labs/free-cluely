@@ -2,6 +2,7 @@
 import { BrowserWindow, screen } from "electron"
 import { AppState } from "main"
 import path from "node:path"
+import { logger } from "./logger"
 
 const isDev = process.env.NODE_ENV === "development"
 
@@ -120,7 +121,7 @@ export class WindowHelper {
     this.mainWindow.setAlwaysOnTop(true)
 
     this.mainWindow.loadURL(startUrl).catch((err) => {
-      console.error("Failed to load URL:", err)
+      logger.error("Failed to load URL:", err)
     })
 
     // Show window after loading URL and center it
@@ -131,7 +132,7 @@ export class WindowHelper {
         this.mainWindow.show()
         this.mainWindow.focus()
         this.mainWindow.setAlwaysOnTop(true)
-        console.log("Window is now visible and centered")
+        logger.info("Window is now visible and centered")
       }
     })
 
@@ -182,7 +183,7 @@ export class WindowHelper {
 
   public hideMainWindow(): void {
     if (!this.mainWindow || this.mainWindow.isDestroyed()) {
-      console.warn("Main window does not exist or is destroyed.")
+      logger.warn("Main window does not exist or is destroyed.")
       return
     }
 
@@ -195,7 +196,7 @@ export class WindowHelper {
 
   public showMainWindow(): void {
     if (!this.mainWindow || this.mainWindow.isDestroyed()) {
-      console.warn("Main window does not exist or is destroyed.")
+      logger.warn("Main window does not exist or is destroyed.")
       return
     }
 
@@ -211,6 +212,15 @@ export class WindowHelper {
     this.mainWindow.showInactive()
 
     this.isWindowVisible = true
+  }
+
+  public minimizeMainWindow(): void {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+      logger.warn("Main window does not exist or is destroyed.")
+      return
+    }
+    this.mainWindow.minimize()
+    this.isWindowVisible = false
   }
 
   public toggleMainWindow(): void {
@@ -255,7 +265,7 @@ export class WindowHelper {
 
   public centerAndShowWindow(): void {
     if (!this.mainWindow || this.mainWindow.isDestroyed()) {
-      console.warn("Main window does not exist or is destroyed.")
+      logger.warn("Main window does not exist or is destroyed.")
       return
     }
 
@@ -265,7 +275,7 @@ export class WindowHelper {
     this.mainWindow.setAlwaysOnTop(true)
     this.isWindowVisible = true
     
-    console.log(`Window centered and shown`)
+    logger.info("Window centered and shown")
   }
 
   // New methods for window movement

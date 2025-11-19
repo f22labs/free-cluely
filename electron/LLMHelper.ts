@@ -1,5 +1,8 @@
 import { GoogleGenerativeAI, GenerativeModel } from "@google/generative-ai"
 import fs from "fs"
+import { logger } from "./logger"
+
+const metricsLoggingEnabled = process.env.RTSTT_METRICS_LOG === "1"
 
 interface OllamaResponse {
   response: string
@@ -19,14 +22,14 @@ export class LLMHelper {
     if (useOllama) {
       this.ollamaUrl = ollamaUrl || "http://localhost:11434"
       this.ollamaModel = ollamaModel || "gemma:latest" // Default fallback
-      console.log(`[LLMHelper] Using Ollama with model: ${this.ollamaModel}`)
+      logger.info("[LLMHelper] Using Ollama with model:", this.ollamaModel)
       
       // Auto-detect and use first available model if specified model doesn't exist
       this.initializeOllamaModel()
     } else if (apiKey) {
       const genAI = new GoogleGenerativeAI(apiKey)
       this.model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" })
-      console.log("[LLMHelper] Using Google Gemini")
+      logger.info("[LLMHelper] Using Google Gemini")
     } else {
       throw new Error("Either provide Gemini API key or enable Ollama mode")
     }
@@ -75,7 +78,7 @@ export class LLMHelper {
       const data: OllamaResponse = await response.json()
       return data.response
     } catch (error) {
-      console.error("[LLMHelper] Error calling Ollama:", error)
+      logger.error("[LLMHelper] Error calling Ollama:", error)
       throw new Error(`Failed to connect to Ollama: ${error.message}. Make sure Ollama is running on ${this.ollamaUrl}`)
     }
   }
@@ -93,30 +96,30 @@ export class LLMHelper {
     try {
       const availableModels = await this.getOllamaModels()
       if (availableModels.length === 0) {
-        console.warn("[LLMHelper] No Ollama models found")
+        logger.warn("[LLMHelper] No Ollama models found")
         return
       }
 
       // Check if current model exists, if not use the first available
       if (!availableModels.includes(this.ollamaModel)) {
         this.ollamaModel = availableModels[0]
-        console.log(`[LLMHelper] Auto-selected first available model: ${this.ollamaModel}`)
+        logger.info("[LLMHelper] Auto-selected first available model:", this.ollamaModel)
       }
 
       // Test the selected model works
       const testResult = await this.callOllama("Hello")
-      console.log(`[LLMHelper] Successfully initialized with model: ${this.ollamaModel}`)
+      logger.info("[LLMHelper] Successfully initialized with model:", this.ollamaModel)
     } catch (error) {
-      console.error(`[LLMHelper] Failed to initialize Ollama model: ${error.message}`)
+      logger.error("[LLMHelper] Failed to initialize Ollama model:", error.message)
       // Try to use first available model as fallback
       try {
         const models = await this.getOllamaModels()
         if (models.length > 0) {
           this.ollamaModel = models[0]
-          console.log(`[LLMHelper] Fallback to: ${this.ollamaModel}`)
+          logger.info("[LLMHelper] Fallback to:", this.ollamaModel)
         }
       } catch (fallbackError) {
-        console.error(`[LLMHelper] Fallback also failed: ${fallbackError.message}`)
+        logger.error("[LLMHelper] Fallback also failed:", fallbackError.message)
       }
     }
   }
@@ -137,7 +140,7 @@ export class LLMHelper {
       const text = this.cleanJsonResponse(response.text())
       return JSON.parse(text)
     } catch (error) {
-      console.error("Error extracting problem from images:", error)
+      logger.error("Error extracting problem from images:", error)
       throw error
     }
   }
@@ -153,17 +156,17 @@ export class LLMHelper {
   }
 }\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
 
-    console.log("[LLMHelper] Calling Gemini LLM for solution...");
+    logger.info("[LLMHelper] Calling Gemini LLM for solution...");
     try {
       const result = await this.model.generateContent(prompt)
-      console.log("[LLMHelper] Gemini LLM returned result.");
+      logger.info("[LLMHelper] Gemini LLM returned result.");
       const response = await result.response
       const text = this.cleanJsonResponse(response.text())
       const parsed = JSON.parse(text)
-      console.log("[LLMHelper] Parsed LLM response:", parsed)
+      logger.debug("[LLMHelper] Parsed LLM response:", parsed)
       return parsed
     } catch (error) {
-      console.error("[LLMHelper] Error in generateSolution:", error);
+      logger.error("[LLMHelper] Error in generateSolution:", error);
       throw error;
     }
   }
@@ -186,10 +189,10 @@ export class LLMHelper {
       const response = await result.response
       const text = this.cleanJsonResponse(response.text())
       const parsed = JSON.parse(text)
-      console.log("[LLMHelper] Parsed debug LLM response:", parsed)
+      logger.debug("[LLMHelper] Parsed debug LLM response:", parsed)
       return parsed
     } catch (error) {
-      console.error("Error debugging solution with images:", error)
+      logger.error("Error debugging solution with images:", error)
       throw error
     }
   }
@@ -209,7 +212,7 @@ export class LLMHelper {
       const text = response.text();
       return { text, timestamp: Date.now() };
     } catch (error) {
-      console.error("Error analyzing audio file:", error);
+      logger.error("Error analyzing audio file:", error);
       throw error;
     }
   }
@@ -228,7 +231,7 @@ export class LLMHelper {
       const text = response.text();
       return { text, timestamp: Date.now() };
     } catch (error) {
-      console.error("Error analyzing audio from base64:", error);
+      logger.error("Error analyzing audio from base64:", error);
       throw error;
     }
   }
@@ -248,7 +251,7 @@ export class LLMHelper {
       const text = response.text();
       return { text, timestamp: Date.now() };
     } catch (error) {
-      console.error("Error analyzing image file:", error);
+      logger.error("Error analyzing image file:", error);
       throw error;
     }
   }
@@ -277,7 +280,7 @@ export class LLMHelper {
       const text = response.text();
       return { text, timestamp: Date.now() };
     } catch (error) {
-      console.error("Error transcribing audio file:", error);
+      logger.error("Error transcribing audio file:", error);
       throw error;
     }
   }
@@ -306,7 +309,7 @@ export class LLMHelper {
       const text = response.text();
       return { text, timestamp: Date.now() };
     } catch (error) {
-      console.error("Error transcribing audio from base64:", error);
+      logger.error("Error transcribing audio from base64:", error);
       throw error;
     }
   }
@@ -323,7 +326,7 @@ export class LLMHelper {
         throw new Error("No LLM provider configured");
       }
     } catch (error) {
-      console.error("[LLMHelper] Error in chatWithGemini:", error);
+      logger.error("[LLMHelper] Error in chatWithGemini:", error);
       throw error;
     }
   }
@@ -346,7 +349,7 @@ export class LLMHelper {
       const data = await response.json();
       return data.models?.map((model: any) => model.name) || [];
     } catch (error) {
-      console.error("[LLMHelper] Error fetching Ollama models:", error);
+      logger.error("[LLMHelper] Error fetching Ollama models:", error);
       return [];
     }
   }
@@ -370,7 +373,7 @@ export class LLMHelper {
       await this.initializeOllamaModel();
     }
     
-    console.log(`[LLMHelper] Switched to Ollama: ${this.ollamaModel} at ${this.ollamaUrl}`);
+    logger.info("[LLMHelper] Switched to Ollama:", this.ollamaModel, "at", this.ollamaUrl);
   }
 
   public async switchToGemini(apiKey?: string): Promise<void> {
@@ -384,7 +387,7 @@ export class LLMHelper {
     }
     
     this.useOllama = false;
-    console.log("[LLMHelper] Switched to Gemini");
+    logger.info("[LLMHelper] Switched to Gemini");
   }
 
   public async testConnection(): Promise<{ success: boolean; error?: string }> {
@@ -413,6 +416,182 @@ export class LLMHelper {
       }
     } catch (error) {
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Retry a function with exponential backoff for rate limit errors
+   * @param fn Function to retry
+   * @param maxRetries Maximum number of retries
+   * @param baseDelay Base delay in milliseconds
+   * @returns Result of the function
+   */
+  private async retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        lastError = error;
+        
+        // Check error status code and message
+        const statusCode = error.status || error.statusCode || error.code;
+        const errorMessage = error.message || String(error) || "";
+        const errorString = errorMessage.toLowerCase();
+        
+        // Check if it's a rate limit error (429)
+        const isRateLimit = statusCode === 429 || 
+                           errorString.includes("429") || 
+                           errorString.includes("too many requests") ||
+                           errorString.includes("resource exhausted") ||
+                           errorString.includes("rate limit");
+        
+        // Check if it's a quota error
+        const isQuotaError = errorString.includes("quota") || 
+                            errorString.includes("quota exceeded");
+        
+        // Check if it's a temporary server error (5xx)
+        const isServerError = statusCode >= 500 && statusCode < 600;
+        
+        // Retry on rate limit, quota, or server errors
+        if ((isRateLimit || isQuotaError || isServerError) && attempt < maxRetries) {
+          const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+          const errorType = isRateLimit ? "rate limit" : isQuotaError ? "quota" : "server error";
+          logger.warn(`[LLMHelper] ${errorType} error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // For other errors or if we've exhausted retries, throw immediately
+        throw error;
+      }
+    }
+    
+    throw lastError;
+  }
+
+  /**
+   * Generate meeting suggestions based on transcript and system prompt
+   * @param transcript Current meeting transcript
+   * @param systemPrompt Context about the person and meeting
+   * @returns Suggestion text and type
+   */
+  public async generateMeetingSuggestion(
+    transcript: string,
+    systemPrompt: string
+  ): Promise<{
+    text: string;
+    type: "response" | "question" | "negotiation";
+    metrics?: {
+      provider: "ollama" | "gemini";
+      model: string;
+      attempts: number;
+      llm_duration_ms: number;
+      llm_started_at: string;
+      llm_completed_at: string;
+    };
+  }> {
+    try {
+      if (metricsLoggingEnabled) {
+        logger.info("[LLMHelper][Metrics] generateMeetingSuggestion invoked");
+      }
+      const llmCallStartEpochMs = Date.now();
+      const llmCallStartIso = new Date(llmCallStartEpochMs).toISOString();
+      let attempts = 0;
+
+      logger.info("[LLMHelper] generateMeetingSuggestion transcript:", transcript);
+
+      const prompt = `You are an AI meeting assistant helping during a live meeting. 
+
+SYSTEM CONTEXT:
+${systemPrompt}
+
+CURRENT MEETING TRANSCRIPT:
+${transcript}
+
+TASK:
+Based on the conversation so far, provide a helpful suggestion for what the person should say or do next. Consider:
+1. If the client asked a question, suggest an empathetic and technically accurate response
+2. If there's a negotiation point, suggest a balanced approach
+3. If the conversation needs direction, suggest a question or topic to bring up
+4. Be concise (2-3 sentences max)
+5. Be empathetic to client concerns while maintaining technical accuracy
+6. Consider the context of the meeting and the person's role
+
+Provide ONLY the suggestion text, no labels or prefixes. Be natural and conversational.`;
+
+      // Use retry logic with exponential backoff for rate limit errors
+      if (metricsLoggingEnabled) {
+        logger.info("[LLMHelper][Metrics] Calling LLM with retry (max 3 retries)");
+      }
+      const responseText = await this.retryWithBackoff(async () => {
+        attempts += 1;
+        if (this.useOllama) {
+          return await this.callOllama(prompt);
+        } else if (this.model) {
+          const result = await this.model.generateContent(prompt);
+          const response = await result.response;
+          return response.text();
+        } else {
+          throw new Error("No LLM provider configured");
+        }
+      }, 3, 1000); // 3 retries, starting with 1 second delay
+
+      // Determine suggestion type based on content
+      const lowerText = responseText.toLowerCase();
+      let type: "response" | "question" | "negotiation" = "response";
+      
+      if (lowerText.includes("?") || lowerText.includes("ask") || lowerText.includes("question")) {
+        type = "question";
+      } else if (
+        lowerText.includes("price") || 
+        lowerText.includes("cost") || 
+        lowerText.includes("deal") || 
+        lowerText.includes("negotiate") ||
+        lowerText.includes("discount") ||
+        lowerText.includes("contract")
+      ) {
+        type = "negotiation";
+      }
+
+      const llmCallCompletedEpochMs = Date.now();
+      const llmCallCompletedIso = new Date(llmCallCompletedEpochMs).toISOString();
+      const durationMs = llmCallCompletedEpochMs - llmCallStartEpochMs;
+
+      if (metricsLoggingEnabled) {
+        logger.info(
+          `[LLMHelper][Metrics] generateMeetingSuggestion finished in ${durationMs}ms (attempts=${attempts}, provider=${this.useOllama ? "ollama" : "gemini"})`
+        );
+      }
+
+      return {
+        text: responseText.trim(),
+        type,
+        metrics: {
+          provider: this.useOllama ? "ollama" : "gemini",
+          model: this.useOllama ? this.ollamaModel : "gemini-2.0-flash",
+          attempts,
+          llm_duration_ms: durationMs,
+          llm_started_at: llmCallStartIso,
+          llm_completed_at: llmCallCompletedIso
+        }
+      };
+    } catch (error: any) {
+      logger.error("[LLMHelper] Error generating meeting suggestion:", error);
+      
+      // Provide user-friendly error messages
+      if (error.message?.includes("429") || error.message?.includes("Too Many Requests")) {
+        throw new Error("API rate limit exceeded. Please wait a moment and try again. The system will automatically retry.");
+      } else if (error.message?.includes("quota") || error.message?.includes("Quota exceeded")) {
+        throw new Error("API quota exceeded. Please check your API usage limits.");
+      } else {
+        throw error;
+      }
     }
   }
 } 

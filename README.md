@@ -48,6 +48,18 @@ npm install
    
    - Save the file
 
+4. Install depedencies
+
+```
+pip install -r requirements.txt
+```
+
+5. Hardware Testing (To check if your mic works)
+
+```
+python3 mic_testing.py
+```
+
 ### Running the App
 
 #### Method 1: Development Mode (Recommended for first run)
