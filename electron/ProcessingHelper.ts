@@ -53,6 +53,7 @@ export class ProcessingHelper {
   } | null = null
   private realtimeSTTProcess: ChildProcess | null = null
   private isPreInitialized: boolean = false  // Track if process was pre-initialized
+  private recorderReadyConfirmed: boolean = false  // Track if Python confirmed recorder is ready
   private lastTranscriptionMetrics: TranscriptionMetricsSnapshot | null = null
   private preInitResolve: ((value: void | PromiseLike<void>) => void) | null = null;
   private preInitReject: ((reason?: any) => void) | null = null;
@@ -409,7 +410,7 @@ export class ProcessingHelper {
         // Send "recorder_ready" status IMMEDIATELY to UI before sending start command
         // This ensures the UI status updates instantly, avoiding "preparing recorder" message
         const mainWindow = this.appState.getMainWindow();
-        if (mainWindow) {
+        if (mainWindow && this.recorderReadyConfirmed) {
           mainWindow.webContents.send("realtime-transcription-status", {
             status: "recorder_ready",
             timestamp: Date.now()
@@ -573,6 +574,7 @@ export class ProcessingHelper {
     
     // Check for recorder_ready status (for pre-initialization)
     if (message.type === "status" && message.status === "recorder_ready") {
+      this.recorderReadyConfirmed = true
       if (this.preInitResolve) {
         logger.info("[ProcessingHelper] Recorder pre-initialized successfully");
         this.preInitResolve();
@@ -588,7 +590,9 @@ export class ProcessingHelper {
       }
       return; // Don't process again in switch statement
     }
-
+    if (message.type === "status" && message.status === "ready") {
+      this.recorderReadyConfirmed = true  // Also mark ready when "ready" status is received
+    }
     if (!mainWindow) return;
 
     switch (message.type) {

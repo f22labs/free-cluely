@@ -22,6 +22,7 @@ def get_available_input_devices(p):
     for i in range(device_count):
         try:
             dev_info = p.get_device_info_by_index(i)
+            print("dev_info: ", dev_info)
             dev_name = dev_info.get('name', '')
             dev_input_channels = dev_info.get('maxInputChannels', 0)
             
@@ -44,6 +45,7 @@ def detect_channel_mapping(p, aggregate_device_index):
     We can only infer based on typical Aggregate Device setup
     """
     device_info = p.get_device_info_by_index(aggregate_device_index)
+    print("device_info: ", device_info)
     device_name = device_info.get('name', '')
     total_channels = device_info.get('maxInputChannels', 0)
     
@@ -53,6 +55,8 @@ def detect_channel_mapping(p, aggregate_device_index):
     
     # Get all available input devices
     input_devices = get_available_input_devices(p)
+
+    print("input_devices: ", input_devices)
     
     print("Available Input Devices:")
     print("-" * 80)
@@ -165,6 +169,8 @@ def detect_audio_source(audio_data, num_channels, channel_mapping):
     for ch in active_channels:
         if ch in channel_mapping:
             device_info = channel_mapping[ch]
+            print("active_channel: ", ch)
+            print("device_name: ", device_info["device_name"])
             device_name = device_info['device_name']
             
             if device_name not in device_activity:
