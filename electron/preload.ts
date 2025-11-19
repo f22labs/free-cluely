@@ -1,4 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron"
+import type {
+  RealtimePartialMetrics,
+  RealtimeCompleteMetrics,
+  RealtimeTimeoutMetrics,
+  MeetingSuggestionMetrics
+} from "../src/types/electron"
 
 // Types for the exposed Electron API
 interface ElectronAPI {
@@ -25,13 +31,16 @@ interface ElectronAPI {
 
   onUnauthorized: (callback: () => void) => () => void
   onDebugError: (callback: (error: string) => void) => () => void
-  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => () => void
-  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => () => void
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => () => void
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => () => void
+  onRealtimeTranscriptionTimeout: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => void) => () => void
+  onRealtimeTranscriptionStatus: (callback: (data: { status: string; timestamp: number }) => void) => () => void
   takeScreenshot: () => Promise<void>
   moveWindowLeft: () => Promise<void>
   moveWindowRight: () => Promise<void>
   moveWindowUp: () => Promise<void>
   moveWindowDown: () => Promise<void>
+  minimizeWindow: () => Promise<void>
   analyzeAudioFromBase64: (data: string, mimeType: string) => Promise<{ text: string; timestamp: number }>
   analyzeAudioFile: (path: string) => Promise<{ text: string; timestamp: number }>
   analyzeImageFile: (path: string) => Promise<void>
@@ -55,6 +64,9 @@ interface ElectronAPI {
   switchToOllama: (model?: string, url?: string) => Promise<{ success: boolean; error?: string }>
   switchToGemini: (apiKey?: string) => Promise<{ success: boolean; error?: string }>
   testLlmConnection: () => Promise<{ success: boolean; error?: string }>
+  
+  // Meeting Assistant
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => Promise<{ text: string; type: "response" | "question" | "negotiation"; metrics?: MeetingSuggestionMetrics }>
   
   invoke: (channel: string, ...args: any[]) => Promise<any>
 }
@@ -185,24 +197,39 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener(PROCESSING_EVENTS.UNAUTHORIZED, subscription)
     }
   },
-  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null }) => void) => {
-    const subscription = (_: any, data: { text: string; fullTranscript: string | null }) => callback(data)
+  onRealtimeTranscriptionUpdate: (callback: (data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string | null; metrics?: RealtimePartialMetrics }) => callback(data)
     ipcRenderer.on("realtime-transcription-update", subscription)
     return () => {
       ipcRenderer.removeListener("realtime-transcription-update", subscription)
     }
   },
-  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string }) => void) => {
-    const subscription = (_: any, data: { text: string; fullTranscript: string }) => callback(data)
+  onRealtimeTranscriptionComplete: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string; metrics?: RealtimeCompleteMetrics }) => callback(data)
     ipcRenderer.on("realtime-transcription-complete", subscription)
     return () => {
       ipcRenderer.removeListener("realtime-transcription-complete", subscription)
+    }
+  },
+  onRealtimeTranscriptionTimeout: (callback: (data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => void) => {
+    const subscription = (_: any, data: { text: string; fullTranscript: string; metrics?: RealtimeTimeoutMetrics }) => callback(data)
+    ipcRenderer.on("realtime-transcription-timeout", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-timeout", subscription)
+    }
+  },
+  onRealtimeTranscriptionStatus: (callback: (data: { status: string; timestamp: number }) => void) => {
+    const subscription = (_: any, data: { status: string; timestamp: number }) => callback(data)
+    ipcRenderer.on("realtime-transcription-status", subscription)
+    return () => {
+      ipcRenderer.removeListener("realtime-transcription-status", subscription)
     }
   },
   moveWindowLeft: () => ipcRenderer.invoke("move-window-left"),
   moveWindowRight: () => ipcRenderer.invoke("move-window-right"),
   moveWindowUp: () => ipcRenderer.invoke("move-window-up"),
   moveWindowDown: () => ipcRenderer.invoke("move-window-down"),
+  minimizeWindow: () => ipcRenderer.invoke("minimize-window"),
   analyzeAudioFromBase64: (data: string, mimeType: string) => ipcRenderer.invoke("analyze-audio-base64", data, mimeType),
   analyzeAudioFile: (path: string) => ipcRenderer.invoke("analyze-audio-file", path),
   analyzeImageFile: (path: string) => ipcRenderer.invoke("analyze-image-file", path),
@@ -234,6 +261,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   switchToOllama: (model?: string, url?: string) => ipcRenderer.invoke("switch-to-ollama", model, url),
   switchToGemini: (apiKey?: string) => ipcRenderer.invoke("switch-to-gemini", apiKey),
   testLlmConnection: () => ipcRenderer.invoke("test-llm-connection"),
+  
+  // Meeting Assistant
+  generateMeetingSuggestion: (transcript: string, systemPrompt: string) => 
+    ipcRenderer.invoke("generate-meeting-suggestion", transcript, systemPrompt),
   
   invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args)
 } as ElectronAPI)
