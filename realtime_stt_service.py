@@ -107,6 +107,9 @@ class RealtimeSTTService:
             return
         timestamp = self._get_timestamp()
         text = message if isinstance(message, str) else str(message)
+        # Also print to stdout for critical debug messages
+        if "[CALLBACK]" in text or "[TRANSCRIPTION_DEBUG]" in text:
+            print(f"[PYTHON_STDOUT] {text}", flush=True)
         print(
             json.dumps({"type": "log", "level": level, "message": text, "timestamp": timestamp}),
             file=sys.stderr,
@@ -315,6 +318,16 @@ class RealtimeSTTService:
         self.is_recording = True
         self._debug("[start_recording()] Set is_recording = True")
         
+        # CRITICAL: Start the recorder to enable voice activity detection and recording
+        if self.recorder is not None:
+            try:
+                # Start the recorder - this enables voice activity detection
+                # The recorder will auto-start recording when voice is detected
+                self.recorder.start()
+                self._debug("[start_recording()] Called recorder.start() - voice activity detection enabled")
+            except Exception as e:
+                self._warn(f"[start_recording()] Error calling recorder.start(): {e}")
+        
         # When reusing a pre-initialized recorder, don't send "recording_started" 
         # because the recorder is already ready. The "recorder_ready" message from run() 
         # will indicate the recorder is ready, avoiding the "preparing recorder" status.
@@ -389,6 +402,10 @@ class RealtimeSTTService:
         
         def on_realtime_update(text):
             """Callback for real-time transcription updates"""
+            import threading
+            thread_id = threading.current_thread().ident
+            thread_name = threading.current_thread().name
+            self._info(f"[THREAD CHECK] Realtime update - Thread ID: {thread_id}, Name: {thread_name}")
             self._info(f"[Transcription Update] iteration {self.current_iteration_index}: {text}")
             now_monotonic = time.monotonic()
             self.last_audio_detected = now_monotonic
@@ -425,8 +442,22 @@ class RealtimeSTTService:
                     self.first_partial_latency_ms = latency_ms
                 self.partial_logged = True
 
-            display_segments = self.full_transcript + ([cleaned] if cleaned else [])
-            full_display = "\n".join(display_segments).strip()
+            # The realtime transcription contains only the current segment's partial text
+            # We need to combine it with completed sentences from previous segments
+            # Strategy: Join completed sentences with spaces, then append current partial
+            completed_text = " ".join(self.full_transcript).strip() if self.full_transcript else ""
+            
+            # Combine completed sentences with current partial
+            if completed_text:
+                # Check if the realtime text is already included in completed text (shouldn't happen, but safety check)
+                if cleaned.lower() not in completed_text.lower():
+                    full_display = f"{completed_text} {cleaned}".strip()
+                else:
+                    # Realtime text is already in completed - just use completed (shouldn't happen normally)
+                    full_display = completed_text
+            else:
+                # No completed sentences yet - just use realtime text
+                full_display = cleaned
 
             emit_timestamp_iso = self._get_timestamp()
             emit_epoch_ms = self._get_epoch_ms()
@@ -456,6 +487,146 @@ class RealtimeSTTService:
         # Store callback for use in run()
         self._on_realtime_update = on_realtime_update
         
+        # Define on_transcription_complete callback BEFORE creating recorder
+        def on_transcription_complete(text):
+            """Callback for completed transcriptions - called by _process_transcription_queue when silence is detected"""
+            self._info(f"[CALLBACK] on_transcription_complete invoked with text length: {len(text) if text else 0}")
+            if text:
+                self._info(f"[CALLBACK] Text preview: {text[:50]}...")
+            else:
+                self._info("[CALLBACK] Text is empty or None")
+            completion_monotonic = time.monotonic()
+            self.last_audio_detected = completion_monotonic
+            total_latency_ms = None
+            if self.current_iteration_start is not None:
+                total_latency_ms = round((completion_monotonic - self.current_iteration_start) * 1000, 2)
+            # Final transcription arrived, cancel any pending timeout for this iteration
+            self._cancel_suggestion_timeout(self.current_iteration_index)
+            if self.debug_enabled and text:
+                self._debug(f"Transcription complete (iteration {self.current_iteration_index}): {text}")
+            try:
+                if text and text.strip():
+                    cleaned = self._preprocess_text(text.strip())
+                    # Remove trailing ellipses
+                    if cleaned.endswith("..."):
+                        cleaned = cleaned[:-3].strip()
+                    
+                    self._info(f"[Transcription Complete] iteration {self.current_iteration_index}: {cleaned}")
+                    
+                    # FILTER: Skip if this looks like an error message being transcribed
+                    error_patterns = [
+                        'no clip', 'no clips', 'clip timestamp', 'clip timestamps',
+                        'timestamp found', 'vad filter', 'set vad', 'runtime error',
+                        'exception', 'error:', 'traceback'
+                    ]
+                    cleaned_lower = cleaned.lower()
+                    if any(pattern in cleaned_lower for pattern in error_patterns):
+                        return  # Don't add error messages to transcript
+                    
+                    if cleaned:
+                        # Merge with realtime buffer: Complete transcription is more accurate,
+                        # but realtime buffer may have additional words spoken after silence detection
+                        # Strategy: Append complete transcription, then append any additional words from realtime buffer
+                        if self.realtime_buffer:
+                            # Get the most recent realtime buffer entry
+                            buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
+                            
+                            # If buffer has additional content not in complete transcription, append it
+                            if buffer_text and buffer_text.strip():
+                                # Check if buffer text contains the complete transcription plus more
+                                if cleaned.lower() in buffer_text.lower():
+                                    # Buffer has complete transcription plus additional words - use buffer
+                                    cleaned = buffer_text
+                                elif buffer_text.lower() not in cleaned.lower():
+                                    # Buffer has different/additional content - append it
+                                    cleaned = f"{cleaned} {buffer_text}".strip()
+                        
+                        # Check if this is already in the transcript to avoid duplicates
+                        if cleaned not in self.full_transcript:
+                            self.full_transcript.append(cleaned)
+                            
+                            buffer_entry_count = len(self.realtime_buffer)
+                            completion_iso = self._get_timestamp()
+                            completion_epoch_ms = self._get_epoch_ms()
+                            metrics_payload = {
+                                "iteration": self.current_iteration_index,
+                                "transcription_latency_ms": total_latency_ms,
+                                "first_partial_latency_ms": self.first_partial_latency_ms,
+                                "partial_update_count": self.partial_update_count,
+                                "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                                "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                                "python_completion_timestamp": completion_iso,
+                                "python_completion_epoch_ms": completion_epoch_ms,
+                                "python_emit_timestamp": completion_iso,
+                                "python_emit_epoch_ms": completion_epoch_ms,
+                                "realtime_buffer_entries": buffer_entry_count,
+                                "fallback_used": False
+                            }
+                            
+                            # Clear real-time buffer AFTER successful transcription and merging
+                            self.realtime_buffer.clear()
+                            
+                            # Send complete transcription
+                            self._send_message({
+                                "type": "transcription_complete",
+                                "text": cleaned,
+                                "full_transcript": "\n".join(self.full_transcript),
+                                "timestamp": completion_iso,
+                                "metrics": metrics_payload
+                            })
+                            
+                            # Persist full transcript to disk
+                            self._write_full_transcript_to_file()
+                        else:
+                            self._debug(f"Skipping duplicate sentence: '{cleaned}' already in transcript")
+                            self.realtime_buffer.clear()
+                else:
+                    self._debug("on_transcription_complete received empty text")
+                    # CRITICAL: If final transcription is empty but buffer has content, use buffer!
+                    # This handles cases where fast speech causes final transcription to fail
+                    if self.realtime_buffer:
+                        self._debug(f"Complete callback empty but buffer has {len(self.realtime_buffer)} entries")
+                        # Use the most complete buffer entry as fallback
+                        buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
+                        if buffer_text and buffer_text.strip():
+                            cleaned = self._preprocess_text(buffer_text.strip())
+                            if cleaned and cleaned not in self.full_transcript:
+                                self._debug(f"Using buffer text '{cleaned[:50]}...' as fallback")
+                                self.full_transcript.append(cleaned)
+                                
+                                buffer_entry_count = len(self.realtime_buffer)
+                                completion_iso = self._get_timestamp()
+                                completion_epoch_ms = self._get_epoch_ms()
+                                metrics_payload = {
+                                    "iteration": self.current_iteration_index,
+                                    "transcription_latency_ms": total_latency_ms,
+                                    "first_partial_latency_ms": self.first_partial_latency_ms,
+                                    "partial_update_count": self.partial_update_count,
+                                    "python_iteration_started_at": self.current_iteration_wallclock_iso,
+                                    "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
+                                    "python_completion_timestamp": completion_iso,
+                                    "python_completion_epoch_ms": completion_epoch_ms,
+                                    "python_emit_timestamp": completion_iso,
+                                    "python_emit_epoch_ms": completion_epoch_ms,
+                                    "realtime_buffer_entries": buffer_entry_count,
+                                    "fallback_used": True
+                                }
+                                
+                                self._send_message({
+                                    "type": "transcription_complete",
+                                    "text": cleaned,
+                                    "full_transcript": "\n".join(self.full_transcript),
+                                    "timestamp": completion_iso,
+                                    "metrics": metrics_payload
+                                })
+                                self._write_full_transcript_to_file()
+                            self.realtime_buffer.clear()
+            except Exception as callback_error:
+                # Don't let callback errors break the loop
+                self._debug(f"Error in on_transcription_complete callback: {callback_error}")
+                import traceback
+                self._debug(f"Callback traceback: {traceback.format_exc()}")
+        
         # Create recorder with callbacks
         try:
             recorder_config = {
@@ -471,6 +642,7 @@ class RealtimeSTTService:
                 'enable_realtime_transcription': True,
                 'realtime_processing_pause': 0.01,
                 'on_realtime_transcription_update': on_realtime_update,
+                'on_transcription_complete': on_transcription_complete,
                 'silero_deactivity_detection': True,
                 'early_transcription_on_silence': 1.8,
                 'silero_use_onnx': True,
@@ -620,137 +792,6 @@ class RealtimeSTTService:
                 })
                 self._append_to_file(cleaned, is_realtime=True)
                 self._schedule_suggestion_timeout(cleaned, full_display)
-        
-        def on_transcription_complete(text):
-            """Callback for completed transcriptions - called by recorder.text()"""
-            completion_monotonic = time.monotonic()
-            self.last_audio_detected = completion_monotonic
-            total_latency_ms = None
-            if self.current_iteration_start is not None:
-                total_latency_ms = round((completion_monotonic - self.current_iteration_start) * 1000, 2)
-            # Final transcription arrived, cancel any pending timeout for this iteration
-            self._cancel_suggestion_timeout(self.current_iteration_index)
-            if self.debug_enabled and text:
-                self._debug(f"Transcription complete (iteration {self.current_iteration_index}): {text}")
-            try:
-                if text and text.strip():
-                    cleaned = self._preprocess_text(text.strip())
-                    # Remove trailing ellipses
-                    if cleaned.endswith("..."):
-                        cleaned = cleaned[:-3].strip()
-                    
-                    self._info(f"[Transcription Complete] iteration {self.current_iteration_index}: {cleaned}")
-                    
-                    # FILTER: Skip if this looks like an error message being transcribed
-                    error_patterns = [
-                        'no clip', 'no clips', 'clip timestamp', 'clip timestamps',
-                        'timestamp found', 'vad filter', 'set vad', 'runtime error',
-                        'exception', 'error:', 'traceback'
-                    ]
-                    cleaned_lower = cleaned.lower()
-                    if any(pattern in cleaned_lower for pattern in error_patterns):
-                        return  # Don't add error messages to transcript
-                    
-                    if cleaned:
-                        if self.realtime_buffer:
-                            # Get the most complete entry from buffer (usually the last one)
-                            buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
-                            
-                            # If buffer text is significantly longer or more complete, it might have more words
-                            # Use the longer/more detailed version, prioritizing buffer during fast speech
-                            if buffer_text and len(buffer_text) > len(cleaned) * 1.2:  # Buffer is 20%+ longer
-                                # Prefer buffer if it's substantially longer (likely more complete for fast speech)
-                                if buffer_text.lower() not in cleaned.lower() and cleaned.lower() not in buffer_text.lower():
-                                    # They're different - merge them intelligently
-                                    # Use buffer if it contains the final text plus more
-                                    if cleaned.lower() in buffer_text.lower():
-                                        cleaned = buffer_text  # Use the longer buffer version
-                        
-                        # Check if this is already in the transcript to avoid duplicates
-                        if cleaned not in self.full_transcript:
-                            self.full_transcript.append(cleaned)
-                            
-                            buffer_entry_count = len(self.realtime_buffer)
-                            completion_iso = self._get_timestamp()
-                            completion_epoch_ms = self._get_epoch_ms()
-                            metrics_payload = {
-                                "iteration": self.current_iteration_index,
-                                "transcription_latency_ms": total_latency_ms,
-                                "first_partial_latency_ms": self.first_partial_latency_ms,
-                                "partial_update_count": self.partial_update_count,
-                                "python_iteration_started_at": self.current_iteration_wallclock_iso,
-                                "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
-                                "python_completion_timestamp": completion_iso,
-                                "python_completion_epoch_ms": completion_epoch_ms,
-                                "python_emit_timestamp": completion_iso,
-                                "python_emit_epoch_ms": completion_epoch_ms,
-                                "realtime_buffer_entries": buffer_entry_count,
-                                "fallback_used": False
-                            }
-                            
-                            # Clear real-time buffer AFTER successful transcription and merging
-                            self.realtime_buffer.clear()
-                            
-                            # Send complete transcription
-                            self._send_message({
-                                "type": "transcription_complete",
-                                "text": cleaned,
-                                "full_transcript": "\n".join(self.full_transcript),
-                                "timestamp": completion_iso,
-                                "metrics": metrics_payload
-                            })
-                            
-                            # Persist full transcript to disk
-                            self._write_full_transcript_to_file()
-                        else:
-                            self._debug(f"Skipping duplicate sentence: '{cleaned}' already in transcript")
-                            self.realtime_buffer.clear()
-                else:
-                    self._debug("on_transcription_complete received empty text")
-                    # CRITICAL: If final transcription is empty but buffer has content, use buffer!
-                    # This handles cases where fast speech causes final transcription to fail
-                    if self.realtime_buffer:
-                        self._debug(f"Complete callback empty but buffer has {len(self.realtime_buffer)} entries")
-                        # Use the most complete buffer entry as fallback
-                        buffer_text = self.realtime_buffer[-1] if self.realtime_buffer else ""
-                        if buffer_text and buffer_text.strip():
-                            cleaned = self._preprocess_text(buffer_text.strip())
-                            if cleaned and cleaned not in self.full_transcript:
-                                self._debug(f"Using buffer text '{cleaned[:50]}...' as fallback")
-                                self.full_transcript.append(cleaned)
-                                
-                                buffer_entry_count = len(self.realtime_buffer)
-                                completion_iso = self._get_timestamp()
-                                completion_epoch_ms = self._get_epoch_ms()
-                                metrics_payload = {
-                                    "iteration": self.current_iteration_index,
-                                    "transcription_latency_ms": total_latency_ms,
-                                    "first_partial_latency_ms": self.first_partial_latency_ms,
-                                    "partial_update_count": self.partial_update_count,
-                                    "python_iteration_started_at": self.current_iteration_wallclock_iso,
-                                    "python_iteration_started_epoch_ms": self.current_iteration_start_epoch_ms,
-                                    "python_completion_timestamp": completion_iso,
-                                    "python_completion_epoch_ms": completion_epoch_ms,
-                                    "python_emit_timestamp": completion_iso,
-                                    "python_emit_epoch_ms": completion_epoch_ms,
-                                    "realtime_buffer_entries": buffer_entry_count,
-                                    "fallback_used": True
-                                }
-                                
-                                self._send_message({
-                                    "type": "transcription_complete",
-                                    "text": cleaned,
-                                    "full_transcript": "\n".join(self.full_transcript),
-                                    "timestamp": completion_iso,
-                                    "metrics": metrics_payload
-                                })
-                                self._write_full_transcript_to_file()
-                            self.realtime_buffer.clear()
-            except Exception as callback_error:
-                # Don't let callback errors break the loop
-                self._debug(f"Error in on_transcription_complete callback: {callback_error}")
-                import traceback
-                self._debug(f"Callback traceback: {traceback.format_exc()}")
         
         # Platform detection and M1-specific diagnostics
         # import platform
@@ -938,48 +979,32 @@ class RealtimeSTTService:
                     else:
                         self._debug("VAD Settings: using pre-initialized recorder configuration")
                     
-                    # recorder.text() blocks until speech is detected and processed
-                    # It will call:
-                    #   - on_realtime_transcription_update (continuously as you speak)
-                    #   - on_transcription_complete (when sentence ends)
-                    # It should return the transcribed text or None
-                    self._debug(f"Calling recorder.text() - iteration {iteration}")
+                    # Continuous recording mode: Don't call blocking text() method
+                    # Instead, recorder runs continuously and:
+                    #   - on_realtime_transcription_update is called continuously (partial updates)
+                    #   - on_transcription_complete is called by _process_transcription_queue when silence is detected
+                    # This ensures no speech is missed and recording never stops
+                    if iteration % 50 == 0:  # Only log every 50 iterations (~5 seconds) to reduce spam
+                        self._debug(f"Continuous recording mode - iteration {iteration}")
+                        self._info(f"[CONTINUOUS] Recording continuously - realtime updates active, complete transcriptions triggered on silence")
                     
-                    # if is_apple_silicon:
-                    #     self._debug("Recorder running on Apple Silicon; monitor callbacks for microphone access issues")
-                    start_block = time.monotonic()
-                    # Call recorder.text() - this blocks until speech is detected
-                    result = self.recorder.text(on_transcription_complete)
-                    block_duration = time.monotonic() - start_block
-                    self._info(
-                        f"[BLOCK] recorder.text() iteration {iteration} "
-                        f"duration={block_duration:.2f}s "
-                        f"partial_logged={self.partial_logged}"
-                    )
+                    # Just wait a bit to allow callbacks to process, then continue loop
+                    # The recorder is already running and processing audio
+                    time.sleep(0.1)  # Small sleep to prevent tight loop
                     
-                    self._debug(f"recorder.text() completed for iteration {iteration}")
-
-                    # Ensure suggestion timeout is cleared once recorder.text completes.
-                    self._cancel_suggestion_timeout(iteration)
-                    
-                    if (result is None or result == "") and not self.partial_logged:
-                        self._warn(f"[AUDIO] recorder.text() returned empty without partial updates (iteration {self.current_iteration_index})")
-                    
-                    self.current_iteration_start = None
-                    self.current_iteration_wallclock_iso = None
-                    self.current_iteration_start_epoch_ms = None
-                    self.current_iteration_monotonic_ms = None
-                    self.first_partial_latency_ms = None
-                    self.partial_update_count = 0
-                    self.partial_logged = False
+                    # Reset iteration tracking periodically (every 10 iterations = ~1 second)
+                    if iteration % 10 == 0:
+                        self.current_iteration_start = None
+                        self.current_iteration_wallclock_iso = None
+                        self.current_iteration_start_epoch_ms = None
+                        self.current_iteration_monotonic_ms = None
+                        self.first_partial_latency_ms = None
+                        self.partial_update_count = 0
+                        self.partial_logged = False
                     
                     # Reset error counter on success
                     consecutive_errors = 0
-                    self._debug(f"Iteration {iteration} completed successfully (result type: {type(result)})")
-                    
-                    # If no result but callback fired, that's OK - continue
-                    if result is None or result == "":
-                        self._debug("recorder.text() returned empty, callback already handled transcription")
+                    self._debug(f"Iteration {iteration} completed successfully - continuous recording mode")
                     
                 except KeyboardInterrupt:
                     self._debug("KeyboardInterrupt received")
