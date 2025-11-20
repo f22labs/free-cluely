@@ -393,30 +393,19 @@ const lastRealtimeTextRef = useRef("")
         //   if (prev.endsWith(fullText)) return prev   // avoid duplicates
         //   return prev ? `${prev}\n${fullText}` : fullText
         // })
+        // Use fullTranscript which already contains completed sentences + current partial properly formatted
         const incoming = data.fullTranscript || data.text || ""
         if (!incoming.trim()) return
+        
         window.electronAPI.logToTerminal("info", "===== REALTIME PUSH TO UI =====")
         window.electronAPI.logToTerminal("info", "Incoming:", incoming)
         window.electronAPI.logToTerminal("info", "Incoming length:", incoming.length)
-        window.electronAPI.logToTerminal("info", "Lines:", incoming.split('\n').length)
         console.log("[MeetingAssistant] Updated transcript:", incoming.substring(0, 50) + "...")
-        setTranscript(prev => {
-          if (!lastRealtimeTextRef.current) {
-            lastRealtimeTextRef.current = incoming
-            return incoming
-          }
-
-          if (incoming.length <= lastRealtimeTextRef.current.length) {
-            lastRealtimeTextRef.current = incoming
-            return prev
-          }
-
-          const newChunk = incoming.slice(lastRealtimeTextRef.current.length).trim()
-          lastRealtimeTextRef.current = incoming
-          if (!newChunk) return prev
-
-          return prev ? `${prev}\n${newChunk}` : newChunk
-        })
+        
+        // Simply replace the transcript with the full transcript - it already contains everything properly formatted
+        // The Python service handles accumulation correctly, so we just display what it sends
+        setTranscript(incoming)
+        lastRealtimeTextRef.current = incoming
         // window.electronAPI.logToTerminal("info", "===== REALTIME UPDATE =====")
         // window.electronAPI.logToTerminal("info", "Full text:", fullText)
         // window.electronAPI.logToTerminal("info", "Text length:", fullText.length)

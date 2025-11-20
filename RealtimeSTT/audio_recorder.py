@@ -85,7 +85,7 @@ TIME_SLEEP = 0.02
 SAMPLE_RATE = 16000
 BUFFER_SIZE = 512
 INT16_MAX_ABS_VALUE = 32768.0
-LOG_FILE_PATH = "/Users/f22labs/Documents/real_time_transcription/free-cluely/realtimesst.log"
+LOG_FILE_PATH = "realtimesst.log"
 
 
 def _ensure_file_handler():
@@ -311,6 +311,7 @@ class AudioToTextRecorder:
                  init_realtime_after_seconds=INIT_REALTIME_INITIAL_PAUSE,
                  on_realtime_transcription_update=None,
                  on_realtime_transcription_stabilized=None,
+                 on_transcription_complete=None,
                  realtime_batch_size: int = 16,
 
                  # Voice activation parameters
@@ -661,6 +662,7 @@ class AudioToTextRecorder:
         self.on_realtime_transcription_stabilized = (
             on_realtime_transcription_stabilized
         )
+        self.on_transcription_complete = on_transcription_complete
         self.debug_mode = debug_mode
         self.handle_buffer_overflow = handle_buffer_overflow
         self.beam_size = beam_size
@@ -1761,28 +1763,81 @@ class AudioToTextRecorder:
             str: The transcription of the recorded audio
         """
         logger.info("[AUDIO_DEBUG] text() method called - waiting for speech detection")
+        print(f"[TRANSCRIPTION_DEBUG] text() method called - on_transcription_finished={on_transcription_finished is not None}", flush=True)
         self.interrupt_stop_event.clear()
         self.was_interrupted.clear()
         try:
+            print(f"[TRANSCRIPTION_DEBUG] About to call wait_audio()", flush=True)
             self.wait_audio()
+            print(f"[TRANSCRIPTION_DEBUG] wait_audio() completed", flush=True)
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt in text() method")
+            print(f"[TRANSCRIPTION_DEBUG] KeyboardInterrupt in text() method", flush=True)
             self.shutdown()
             raise  # Re-raise the exception after cleanup
 
         if self.is_shut_down or self.interrupt_stop_event.is_set():
+            print(f"[TRANSCRIPTION_DEBUG] Shutdown or interrupt detected, returning empty", flush=True)
             if self.interrupt_stop_event.is_set():
                 self.was_interrupted.set()
             return ""
 
         if on_transcription_finished:
-            threading.Thread(target=on_transcription_finished,
-                            args=(self.transcribe(),)).start()
-            # def _run_transcription():
-            #     result = self.transcribe()
-            #     on_transcription_finished(result)
+            logger.info(f"[TRANSCRIPTION_DEBUG] text() - on_transcription_finished callback provided")
+            print(f"[TRANSCRIPTION_DEBUG] text() - on_transcription_finished callback provided", flush=True)
+            logger.info(f"[TRANSCRIPTION_DEBUG] self.audio status: exists={self.audio is not None}, length={len(self.audio) if self.audio is not None else 0}")
+            print(f"[TRANSCRIPTION_DEBUG] self.audio status: exists={self.audio is not None}, length={len(self.audio) if self.audio is not None else 0}", flush=True)
+            
+            # Capture audio immediately after wait_audio() completes
+            audio_copy = None
+            if self.audio is not None and len(self.audio) > 0:
+                audio_copy = copy.deepcopy(self.audio)
+                logger.info(f"[TRANSCRIPTION_DEBUG] Captured audio copy: length={len(audio_copy)}")
+            else:
+                logger.warning(f"[TRANSCRIPTION_DEBUG] self.audio is empty or None - cannot capture copy")
 
-            # threading.Thread(target=_run_transcription, daemon=True).start()
+            def _run_transcription():
+                logger.info(f"[TRANSCRIPTION_DEBUG] _run_transcription thread started")
+                print(f"[TRANSCRIPTION_DEBUG] _run_transcription thread started", flush=True)
+                try:
+                    # Use captured audio if available, otherwise fall back to self.audio
+                    if audio_copy is not None and len(audio_copy) > 0:
+                        logger.info(f"[TRANSCRIPTION_DEBUG] Using captured audio copy (length={len(audio_copy)})")
+                        # Temporarily set self.audio to our captured copy
+                        original_audio = self.audio
+                        self.audio = audio_copy
+                        try:
+                            logger.info(f"[TRANSCRIPTION_DEBUG] Calling transcribe() with captured audio")
+                            result = self.transcribe()
+                            logger.info(f"[TRANSCRIPTION_DEBUG] transcribe() returned: length={len(result) if result else 0}, preview={result[:50] if result else 'None'}...")
+                        finally:
+                            # Restore original audio
+                            self.audio = original_audio
+                    else:
+                        logger.warning(f"[TRANSCRIPTION_DEBUG] audio_copy is empty, falling back to self.audio")
+                        logger.info(f"[TRANSCRIPTION_DEBUG] self.audio status: exists={self.audio is not None}, length={len(self.audio) if self.audio is not None else 0}")
+                        result = self.transcribe()
+                        logger.info(f"[TRANSCRIPTION_DEBUG] transcribe() returned: length={len(result) if result else 0}, preview={result[:50] if result else 'None'}...")
+                    
+                    # Always call the callback, even if result is empty
+                    logger.info(f"[TRANSCRIPTION_DEBUG] About to call on_transcription_finished callback with result length={len(result) if result else 0}")
+                    print(f"[TRANSCRIPTION_DEBUG] About to call on_transcription_finished callback with result length={len(result) if result else 0}", flush=True)
+                    on_transcription_finished(result if result else "")
+                    logger.info(f"[TRANSCRIPTION_DEBUG] on_transcription_finished callback completed")
+                    print(f"[TRANSCRIPTION_DEBUG] on_transcription_finished callback completed", flush=True)
+                except Exception as e:
+                    logger.error(f"[TRANSCRIPTION_DEBUG] Error in transcription thread: {e}", exc_info=True)
+                    # Call callback with empty string on error
+                    try:
+                        logger.info(f"[TRANSCRIPTION_DEBUG] Calling callback with empty string due to error")
+                        on_transcription_finished("")
+                        logger.info(f"[TRANSCRIPTION_DEBUG] Error callback completed")
+                    except Exception as callback_error:
+                        logger.error(f"[TRANSCRIPTION_DEBUG] Error calling transcription callback: {callback_error}", exc_info=True)
+
+            logger.info(f"[TRANSCRIPTION_DEBUG] Starting transcription thread")
+            threading.Thread(target=_run_transcription, daemon=True).start()
+            logger.info(f"[TRANSCRIPTION_DEBUG] Transcription thread started, returning from text()")
         else:
             return self.transcribe()
 
@@ -1827,6 +1882,14 @@ class AudioToTextRecorder:
         self.is_webrtc_speech_active = False
         self.stop_recording_event.clear()
         self.start_recording_event.set()
+        
+        # Enable voice activity detection for continuous recording
+        # This allows the recorder to automatically start capturing audio when voice is detected
+        # Even though is_recording is True, we keep this True so the recorder continues listening
+        # for new voice segments after silence
+        self.start_recording_on_voice_activity = True
+        # Also ensure we don't stop on voice deactivity (continuous mode)
+        self.stop_recording_on_voice_deactivity = False
 
         if self.on_recording_start:
             self._run_callback(self.on_recording_start)
@@ -2358,8 +2421,14 @@ class AudioToTextRecorder:
                                 logger.debug('Debug: Appending data to frames and stopping recording')
                             logger.info("Appending data to frames")
                             self.frames.append(data)
-                            # logger.info("Calling stop()")
-                            # self.stop()
+                            
+                            # CRITICAL: If wait_audio() is waiting for stop_recording_event, we MUST set it
+                            # This happens when stop_recording_on_voice_deactivity is True (set in wait_audio())
+                            if self.stop_recording_on_voice_deactivity:
+                                logger.info("stop_recording_on_voice_deactivity is True - setting stop_recording_event for wait_audio()")
+                                self.stop_recording_event.set()
+                                self.stop_recording_on_voice_deactivity = False
+                            
                             # Instead of stopping, queue this segment for async transcription
                             if self.frames:  # Only if we have frames to transcribe
                                 logger.info(f"Queueing segment with {len(self.frames)} frames for async transcription")
@@ -2472,6 +2541,10 @@ class AudioToTextRecorder:
         This ensures audio capture never stops, even during transcription.
         """
         logger.info("Starting async transcription processor")
+        import threading
+        thread_id = threading.current_thread().ident
+        thread_name = threading.current_thread().name
+        logger.info(f"[THREAD CHECK] Transcription queue - Thread ID: {thread_id}, Name: {thread_name}")
         self.is_transcribing = True
         
         try:
@@ -2505,8 +2578,16 @@ class AudioToTextRecorder:
 
                         if transcription:
                             logger.info(f"Async transcription completed: {transcription[:50]}...")
+                            # Call completion callback if provided
+                            if hasattr(self, 'on_transcription_complete') and self.on_transcription_complete:
+                                logger.info(f"Calling on_transcription_complete callback with transcription")
+                                self._run_callback(self.on_transcription_complete, transcription)
                         else:
                             logger.warning("Async transcription returned empty result")
+                            # Still call callback with empty string
+                            if hasattr(self, 'on_transcription_complete') and self.on_transcription_complete:
+                                logger.info(f"Calling on_transcription_complete callback with empty result")
+                                self._run_callback(self.on_transcription_complete, "")
                     except Exception as e:
                         logger.error(f"Error during async transcription: {e}", exc_info=True)
                     finally:
