@@ -8,6 +8,7 @@ yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
 .venv
+venv
 transcripts/*
 DRAGGABLE_RESIZABLE_UPDATE.md
 KNOWLEDGE_BASE.md

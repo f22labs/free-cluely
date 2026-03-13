@@ -39,7 +39,7 @@ const MeetingAssistant: React.FC<MeetingAssistantProps> = ({ setView }) => {
   const [isGenerating, setIsGenerating] = useState(false)
   const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({
     provider: "gemini",
-    model: "gemini-2.0-flash"
+    model: "gemini-2.5-flash"
   })
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isResizing, setIsResizing] = useState(false)
